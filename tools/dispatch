@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+import argparse
+
+from orchestra.config import load_config
+from orchestra.dispatch import dispatch
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Route eligible issues to agents.")
+    ap.add_argument("--root", required=True)
+    args = ap.parse_args()
+    root = Path(args.root)
+    cfg = load_config(root / "config.yaml")
+    started = datetime.now(timezone.utc).isoformat()
+    try:
+        launched = dispatch(root, cfg, started=started)
+    except ValueError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+    for key in launched:
+        print(f"launched {key}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

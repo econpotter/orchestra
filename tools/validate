@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from orchestra import layout
+from orchestra.projects import find_project, read_projects
+from orchestra.queue import find_issue, read_queue
+from orchestra.validate import validate_structural
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Structurally validate an issue.")
+    ap.add_argument("--root", required=True)
+    ap.add_argument("project")
+    ap.add_argument("number", type=int)
+    args = ap.parse_args()
+
+    qf = layout.queue_file(args.root, args.project)
+    try:
+        issues = read_queue(qf)
+    except ValueError as exc:
+        print(f"malformed queue: {exc}", file=sys.stderr)
+        return 2
+
+    issue = find_issue(issues, args.number)
+    if issue is None:
+        print(f"issue #{args.number} not found in {qf}", file=sys.stderr)
+        return 2
+
+    project = find_project(read_projects(Path(args.root) / "PROJECTS.md"), args.project)
+    if project is None:
+        print(f"project {args.project!r} not in PROJECTS.md", file=sys.stderr)
+        return 2
+    known_ids = {i.number for i in issues}
+    result = validate_structural(
+        issue, project_path=project.path, orchestra_root=Path(args.root),
+        known_ids=known_ids,
+    )
+    if result.ok:
+        return 0
+    for reason in result.reasons:
+        print(reason)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

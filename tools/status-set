@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from orchestra import layout
+from orchestra.queue import find_issue, read_queue, write_queue
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Set an issue's status/fields.")
+    ap.add_argument("--root", required=True)
+    ap.add_argument("project")
+    ap.add_argument("number", type=int)
+    ap.add_argument("status")
+    ap.add_argument("--reason", default=None)
+    ap.add_argument("--retries", type=int, default=None)
+    ap.add_argument("--worker", default=None)
+    args = ap.parse_args()
+
+    qf = layout.queue_file(args.root, args.project)
+    issues = read_queue(qf)
+    issue = find_issue(issues, args.number)
+    if issue is None:
+        print(f"issue #{args.number} not found in {qf}", file=sys.stderr)
+        return 2
+
+    issue.status = args.status
+    if args.reason is not None:
+        issue.blocked_reason = args.reason
+    if args.retries is not None:
+        issue.retries = args.retries
+    if args.worker is not None:
+        issue.worker = None if args.worker.lower() in {"null", "none", ""} else args.worker
+
+    write_queue(qf, issues)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

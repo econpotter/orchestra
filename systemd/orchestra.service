@@ -1,0 +1,22 @@
+[Unit]
+Description=Orchestra tick (dispatch + reconcile)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Uses the uv-tool-installed CLI (its own venv has the deps). Configure the workspace once
+# with `orchestra workspace set PATH`; the unit then survives workspace directory renames.
+#
+# systemd user services need two things orchestra depends on, or workers never run:
+#  1. KillMode=process — a oneshot's default control-group kill reaps the whole cgroup
+#     when `tick` exits, killing the detached worker/validator agents it just launched
+#     (they die with no commit/result and get classified as a crash). process-mode lets
+#     them outlive the tick (the cron "orphan + reparent to init" model).
+#  2. PATH — user services start with a minimal PATH. It MUST include the provider CLI
+#     (claude/codex) and the tools agents run (uv, git, node). ~/.local/bin covers a
+#     uv/npm-installed claude + uv; APPEND wherever yours live (e.g. nvm's node bin,
+#     ~/.cargo/bin). Find them with `command -v claude uv git node`.
+KillMode=process
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=%h/.local/bin/orchestra tick

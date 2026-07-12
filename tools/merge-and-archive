@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from orchestra.archive import merge_and_archive
+from orchestra.config import load_config
+from orchestra.projects import find_project, read_projects
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Merge an issue branch and archive it.")
+    ap.add_argument("--root", required=True)
+    ap.add_argument("project")
+    ap.add_argument("number", type=int)
+    args = ap.parse_args()
+    root = Path(args.root)
+    project = find_project(read_projects(root / "PROJECTS.md"), args.project)
+    if project is None:
+        print(f"project {args.project!r} not in PROJECTS.md", file=sys.stderr)
+        return 2
+    try:
+        cfg_path = root / "config.yaml"
+        cap = load_config(cfg_path).retries_cap if cfg_path.exists() else 2
+        result = merge_and_archive(root, project, args.number, rebase_cap=cap)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
+    except subprocess.CalledProcessError as exc:
+        print(f"git merge error: {exc.stderr.strip()}", file=sys.stderr)
+        return 1
+    if result == "blocked":
+        print(
+            f"{args.project}#{args.number}: still conflicts after repeated reworks — blocked",
+            file=sys.stderr,
+        )
+        return 5
+    if result == "reworked":
+        print(
+            f"{args.project}#{args.number}: conflicts with base — sent back to rework "
+            f"(rebase off current base)",
+            file=sys.stderr,
+        )
+        return 4
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

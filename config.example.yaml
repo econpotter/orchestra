@@ -1,0 +1,22 @@
+slots: 2
+roles:
+  validator: {provider: codex, model: gpt-5.4-mini, prompt: prompts/validator.md}
+  worker: {provider: codex, model: gpt-5.4, prompt: prompts/worker.md}
+  verifier: {provider: codex, model: gpt-5.4, prompt: prompts/verify-review.md}
+validate: {semantic: false}
+stall: {idle_minutes: 0}
+retries_cap: 2
+crash_retries_cap: 2
+providers:
+  codex:
+    argv: ["codex", "exec", "--model", "{model}", "-C", "{workdir}", "--skip-git-repo-check"]
+    prompt: stdin
+sandbox: {enabled: false, argv_prefix: []}
+workflows:
+  python:
+    lint: "uv run ruff check"
+    test: "uv run pytest"
+    typecheck: "uv run mypy src"
+verify: {rerun_checks: false}
+review: {autoapprove: false}
+template_path: projects/project-template

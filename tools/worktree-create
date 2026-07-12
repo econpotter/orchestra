@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+# tools/worktree-create
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from orchestra import git_ops, layout
+from orchestra.issue import branch_name
+from orchestra.projects import find_project, read_projects
+from orchestra.queue import find_issue, read_queue
+from orchestra.worktree import seed_worktree
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Create a worktree for an issue.")
+    ap.add_argument("--root", required=True)
+    ap.add_argument("project")
+    ap.add_argument("number", type=int)
+    args = ap.parse_args()
+    root = Path(args.root)
+
+    project = find_project(read_projects(root / "PROJECTS.md"), args.project)
+    if project is None:
+        print(f"project {args.project!r} not in PROJECTS.md", file=sys.stderr)
+        return 2
+
+    issue = find_issue(read_queue(layout.queue_file(root, args.project)), args.number)
+    if issue is None:
+        print(f"issue #{args.number} not found", file=sys.stderr)
+        return 2
+
+    repo = root / project.path
+    wt = layout.worktree_dir(root, args.project, args.number)
+    fresh = not wt.exists()
+    try:
+        git_ops.create_worktree(repo, wt, branch_name(issue), project.branch)
+    except subprocess.CalledProcessError as exc:
+        print(f"git error creating worktree: {exc.stderr.strip()}", file=sys.stderr)
+        return 1
+    if fresh:
+        seed_worktree(repo, wt, project.worktree_seed)
+    print(str(wt))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

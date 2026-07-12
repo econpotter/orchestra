@@ -1,0 +1,12 @@
+[Unit]
+Description=Run orchestra tick every 15 minutes
+
+[Timer]
+OnBootSec=2min
+# Cadence — change this, then: systemctl --user daemon-reload && systemctl --user restart orchestra.timer
+# e.g. */5 min: *:0/5 · */10: *:0/10 · every 2 min: *:0/2 · hourly: hourly
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target
