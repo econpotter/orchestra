@@ -43,6 +43,15 @@ gate plus the agent prompt, not a run-time egress block.
 
 Run `orchestra <command> --help` for details.
 
+## Worktree data
+Each issue inherits its project's `Worktree-Seed` entries from the workspace's
+`PROJECTS.md`; issues do not duplicate them. Entries are comma-separated: `path` copies a
+seed, `path:link` creates a writable symlink, and `path:ro-link` shares the project source
+read-only inside workers and verifiers. An untracked destination is a symlink; an existing
+tracked path is used as the bind mount point. `ro-link` requires Bubblewrap (`bwrap`), and
+a missing source fails dispatch. `orchestra issue show <project> <n>` prints the effective
+seed list.
+
 ## Wiring a project (one-time)
 Add ONE line to the project's `AGENTS.md`:
 

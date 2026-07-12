@@ -11,7 +11,7 @@ from orchestra.issue import Issue, branch_name
 from orchestra.projects import Project, read_projects
 from orchestra.prompting import render_prompt
 from orchestra.queue import read_queue
-from orchestra.worktree import seed_worktree
+from orchestra.worktree import prepare_read_only_binds, seed_worktree
 from orchestra.worktree_db import create_worktree_db
 from orchestra.registry import (
     WorkerHandle,
@@ -149,13 +149,18 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                 if role == "validator":
                     workdir = root
                     start_sha = ""
+                    read_only_binds = []
                 else:
                     workdir = layout.worktree_dir(root, project.name, issue.number)
                     if not workdir.exists():
                         git_ops.create_worktree(
                             root / project.path, workdir, branch_name(issue), project.branch
                         )
-                        seed_worktree(
+                        read_only_binds = seed_worktree(
+                            root / project.path, workdir, project.worktree_seed
+                        )
+                    else:
+                        read_only_binds = prepare_read_only_binds(
                             root / project.path, workdir, project.worktree_seed
                         )
                     # Ensure this issue's Postgres clone exists and the worktree .env
@@ -187,6 +192,7 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                     provider, config.sandbox, ctx,
                     prompt_text=prompt_text, cwd=Path(workdir), log_path=log,
                     completion_path=completion, stop_path=stop,
+                    read_only_binds=read_only_binds,
                 )
                 reg[key] = WorkerHandle(
                     project=project.name, number=issue.number, role=role,

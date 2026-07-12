@@ -12,7 +12,7 @@ def _parse_seed(value: str) -> list[tuple[str, str]]:
     """Parse a `Worktree-Seed` value into `(path, mode)` pairs.
 
     Format: comma-separated `path` (mode defaults to `copy`) or `path:mode`
-    where mode is `copy`, `link`, or `symlink` (an alias for `link`).
+    where mode is `copy`, `link`, `ro-link`, or `symlink` (an alias for `link`).
     """
     out: list[tuple[str, str]] = []
     for item in value.split(","):
@@ -21,12 +21,18 @@ def _parse_seed(value: str) -> list[tuple[str, str]]:
             continue
         path, _, mode = item.partition(":")
         path = path.strip()
+        seed_path = Path(path)
+        if not path or seed_path.is_absolute() or ".." in seed_path.parts:
+            raise ValueError(
+                f"Worktree-Seed: {path!r} must be a relative project path without '..'"
+            )
         mode = (mode.strip().lower() or "copy")
         if mode == "symlink":
             mode = "link"
-        if mode not in ("copy", "link"):
+        if mode not in ("copy", "link", "ro-link"):
             raise ValueError(
-                f"Worktree-Seed: bad mode {mode!r} for {path!r} (use copy|link|symlink)"
+                f"Worktree-Seed: bad mode {mode!r} for {path!r} "
+                "(use copy|link|ro-link|symlink)"
             )
         out.append((path, mode))
     return out

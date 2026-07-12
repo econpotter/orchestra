@@ -41,6 +41,26 @@ def test_issue_show_includes_decisions(tmp_path, capsys):
     assert "chose y" in out and "issue/001-alpha" in out
 
 
+def test_issue_show_includes_project_worktree_seeds(tmp_path, capsys):
+    _setup(tmp_path)
+    projects_path = tmp_path / "PROJECTS.md"
+    projects_path.write_text(
+        projects_path.read_text().replace(
+            "- Focus: none\n",
+            "- Worktree-Seed: data/raw:ro-link, fixtures:copy\n- Focus: none\n",
+        )
+    )
+
+    rc = main(["--root", str(tmp_path), "issue", "show", "wf", "1", "--json"])
+
+    assert rc == 0
+    info = json.loads(capsys.readouterr().out)
+    assert info["worktree_seed"] == [
+        {"path": "data/raw", "mode": "ro-link"},
+        {"path": "fixtures", "mode": "copy"},
+    ]
+
+
 def test_status_json(tmp_path, capsys):
     _setup(tmp_path)
     rc = main(["--root", str(tmp_path), "status", "--json"])

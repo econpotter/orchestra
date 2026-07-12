@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from orchestra.projects import find_project, read_projects
 
 PROJECTS = """\
@@ -47,7 +49,9 @@ def test_worktree_seed_parsing(tmp_path):
         "## alpha\n- Path: projects/alpha\n- Branch: main\n- Purpose: t\n"
         "- Queue: queue/alpha.md\n- Worktree-Seed: data:link\n- Focus: none\n\n"
         "## mixed\n- Path: projects/mixed\n- Branch: main\n- Purpose: t\n"
-        "- Queue: queue/mixed.md\n- Worktree-Seed: fixtures, cache:symlink\n- Focus: none\n\n"
+        "- Queue: queue/mixed.md\n"
+        "- Worktree-Seed: fixtures, cache:symlink, data/raw:ro-link\n"
+        "- Focus: none\n\n"
         "## bare\n- Path: projects/bare\n- Branch: main\n- Purpose: t\n"
         "- Queue: queue/bare.md\n- Focus: none\n"
     )
@@ -57,6 +61,7 @@ def test_worktree_seed_parsing(tmp_path):
     assert find_project(projects, "mixed").worktree_seed == [
         ("fixtures", "copy"),
         ("cache", "link"),
+        ("data/raw", "ro-link"),
     ]
     assert find_project(projects, "bare").worktree_seed == []
 
@@ -71,6 +76,17 @@ def test_worktree_seed_bad_mode(tmp_path):
         "- Queue: queue/x.md\n- Worktree-Seed: data:move\n- Focus: none\n"
     )
     with pytest.raises(ValueError):
+        read_projects(p)
+
+
+@pytest.mark.parametrize("seed", ["/data:ro-link", "../data:ro-link", "data/../raw:ro-link"])
+def test_worktree_seed_rejects_paths_outside_project(tmp_path, seed):
+    p = tmp_path / "PROJECTS.md"
+    p.write_text(
+        "# Projects\n\n## x\n- Path: projects/x\n- Branch: main\n- Purpose: t\n"
+        f"- Queue: queue/x.md\n- Worktree-Seed: {seed}\n- Focus: none\n"
+    )
+    with pytest.raises(ValueError, match="relative project path"):
         read_projects(p)
 
 

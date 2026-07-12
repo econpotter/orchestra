@@ -128,6 +128,30 @@ def test_dispatch_does_not_pass_network_to_launch(tmp_path: Path, monkeypatch):
     assert seen["003"] is True
 
 
+def test_dispatch_passes_project_ro_seeds_to_launch(tmp_path: Path, monkeypatch):
+    from orchestra import dispatch as dispatch_mod
+
+    seen = []
+
+    def _fake_launch(provider, sandbox, context, *, read_only_binds, **kwargs):
+        seen.extend(read_only_binds)
+        return 4321
+
+    monkeypatch.setattr(dispatch_mod, "launch", _fake_launch)
+    _setup(tmp_path, _issue(3, "validated"))
+    projects = (tmp_path / "PROJECTS.md").read_text().replace(
+        "- Focus: none\n", "- Worktree-Seed: data/raw:ro-link\n- Focus: none\n"
+    )
+    (tmp_path / "PROJECTS.md").write_text(projects)
+    raw = tmp_path / "projects" / "wf" / "data" / "raw"
+    raw.mkdir(parents=True)
+
+    cfg = load_config(tmp_path / "config.yaml")
+    dispatch(tmp_path, cfg, started="2026-06-26T00:00:00Z")
+
+    assert seen == [(raw.resolve(), raw.resolve())]
+
+
 def test_dispatch_respects_slots(tmp_path: Path):
     _setup(tmp_path, _issue(1, "open") + "\n" + _issue(2, "open") + "\n" + _issue(3, "open"))
     cfg = load_config(tmp_path / "config.yaml")

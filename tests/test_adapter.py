@@ -31,6 +31,34 @@ def test_build_argv_prepends_sandbox_when_enabled():
     assert argv == ["bwrap", "--bind", "/wt", "claude", "m1"]
 
 
+def test_build_argv_adds_ro_binds_after_writable_workdir_bind():
+    p = ProviderConfig(argv=["claude", "{model}"], prompt="stdin")
+    sb = Sandbox(enabled=True, argv_prefix=["bwrap", "--bind", "{workdir}", "{workdir}"])
+    argv = build_argv(
+        p, sb, {"model": "m1", "workdir": "/wt"},
+        read_only_binds=[(Path("/repo/data/raw"), Path("/wt/data/raw"))],
+    )
+    assert argv == [
+        "bwrap", "--bind", "/wt", "/wt",
+        "--ro-bind", "/repo/data/raw", "/wt/data/raw",
+        "claude", "m1",
+    ]
+
+
+def test_build_argv_uses_minimal_bwrap_for_ro_binds_without_full_sandbox():
+    p = ProviderConfig(argv=["claude"], prompt="stdin")
+    argv = build_argv(
+        p, Sandbox(enabled=False, argv_prefix=[]), {},
+        read_only_binds=[(Path("/repo/data/raw"), Path("/wt/data/raw"))],
+    )
+    assert argv == [
+        "bwrap", "--bind", "/", "/",
+        "--dev-bind", "/dev", "/dev",
+        "--ro-bind", "/repo/data/raw", "/wt/data/raw",
+        "claude",
+    ]
+
+
 def _wait_dead(pid: int, timeout: float = 15.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -73,16 +101,16 @@ def test_launch_fake_worker_commits_and_writes_result(tmp_path: Path):
     assert int(out) == 2
 
 
-def _shipped_sandbox_prefix() -> list[str]:
-    """The real filesystem-confinement prefix from config.yaml — kept in sync so this test
-    exercises what actually ships."""
-    from orchestra.config import load_config
-    cfg = load_config(REPO_ROOT / "config.yaml")
-    return cfg.sandbox.argv_prefix
+def _sandbox_prefix() -> list[str]:
+    return [
+        "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+        "--bind", "{workdir}", "{workdir}", "--bind", "/tmp", "/tmp",
+        "--bind", "{results_dir}", "{results_dir}",
+    ]
 
 
 def test_launch_real_process_under_sandbox_prefix(tmp_path: Path):
-    """Launch a REAL process under the shipped sandbox prefix — not just build argv. The
+    """Launch a REAL process under a complete sandbox prefix — not just build argv. The
     #004 prefix bound no rootfs, so bwrap could not exec the agent at all (execvp: No such
     file or directory). This runs the fake worker for real inside the sandbox: it must exec,
     make a git commit, and write its result. Also asserts the sandbox confines writes — the
@@ -102,7 +130,7 @@ def test_launch_real_process_under_sandbox_prefix(tmp_path: Path):
     results.mkdir()
     rf = results / "wf#001.json"
     log = tmp_path / "logs" / "wf#001.log"
-    sb = Sandbox(enabled=True, argv_prefix=_shipped_sandbox_prefix())
+    sb = Sandbox(enabled=True, argv_prefix=_sandbox_prefix())
     ctx = {
         "role": "worker", "result_file": str(rf),
         "workdir": str(repo), "results_dir": str(results),
@@ -130,6 +158,48 @@ def test_launch_real_process_under_sandbox_prefix(tmp_path: Path):
         build_argv(write_provider, sb, ctx), cwd=str(repo), capture_output=True, text=True,
     )
     assert denied.returncode != 0 and "Read-only file system" in denied.stderr
+
+
+def test_real_ro_bind_denies_seed_write_but_allows_other_worktree_writes(tmp_path: Path):
+    import shutil
+
+    import pytest
+
+    if shutil.which("bwrap") is None:
+        pytest.skip("bwrap not installed")
+
+    source = tmp_path / "repo" / "data" / "raw"
+    source.mkdir(parents=True)
+    (source / "input.csv").write_text("source\n")
+    worktree = tmp_path / "worktree"
+    destination = worktree / "data" / "raw"
+    destination.mkdir(parents=True)
+    provider = ProviderConfig(
+        argv=[
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; "
+                "Path('build.txt').write_text('ok'); "
+                "Path('data/raw/input.csv').write_text('changed')"
+            ),
+        ],
+        prompt="stdin",
+    )
+    result = subprocess.run(
+        build_argv(
+            provider, Sandbox(False, []), {},
+            read_only_binds=[(source, destination)],
+        ),
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Read-only file system" in result.stderr
+    assert (worktree / "build.txt").read_text() == "ok"
+    assert (source / "input.csv").read_text() == "source\n"
 
 
 def test_launch_arg_mode_passes_prompt_as_last_argv(tmp_path):

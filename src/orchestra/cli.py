@@ -134,6 +134,9 @@ def cmd_issue_show(args: argparse.Namespace) -> int:
         "verifier_feedback": issue.verifier_feedback,
         "branch": branch_name(issue),
         "worktree": str(layout.worktree_dir(root, args.project, issue.number)),
+        "worktree_seed": [
+            {"path": path, "mode": mode} for path, mode in project.worktree_seed
+        ],
     }
     if args.json:
         print(json.dumps(info))
@@ -142,6 +145,10 @@ def cmd_issue_show(args: argparse.Namespace) -> int:
         print(render_issue(issue))
         print(f"\nbranch:   {info['branch']}")
         print(f"worktree: {info['worktree']}")
+        seeds = ", ".join(
+            f"{seed['path']}:{seed['mode']}" for seed in info["worktree_seed"]
+        ) or "none"
+        print(f"seeds:    {seeds}")
     return 0
 
 

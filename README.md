@@ -70,5 +70,9 @@ takes effect on the next tick.
   archived, plus blocked / needs_rework. See `protocol/STATES.md`.
 - **Per project** — add one line to its `AGENTS.md`: *"If working with orchestra, run
   `orchestra guide`."* Remove it to opt the project out.
+- **Worktree data** — declare comma-separated `Worktree-Seed` entries in the workspace's
+  `PROJECTS.md`. Use `path` to copy, `path:link` for a writable symlink, or
+  `path:ro-link` to share data while enforcing read-only access inside agents (`bwrap`
+  required). Issues inherit the project declaration automatically.
 
 See `ORCHESTRA.md` (operating manual) and `docs/superpowers/specs/` (design) for depth.
