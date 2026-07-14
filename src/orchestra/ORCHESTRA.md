@@ -1,9 +1,9 @@
 # Working with orchestra
 
 orchestra runs work across projects unattended. This is how to hand it work and act on
-results from a project session. (Requires the `orchestra` CLI on PATH —
-`uv tool install orchestra` — then `orchestra workspace set PATH`, set `ORCHESTRA_ROOT`,
-or pass `--root`.)
+results from a project session. Install the public engine checkout with
+`uv tool install --force --editable /path/to/orchestra`, then select the separate workspace
+with `orchestra workspace set PATH`, set `ORCHESTRA_ROOT`, or pass `--root`.
 
 ## Starting a project
 Create and register a new project:
