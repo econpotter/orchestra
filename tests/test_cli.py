@@ -10,7 +10,7 @@ def test_guide_prints_integration_doc(capsys):
     assert "blocked -> open" in out
     assert "Do not run `orchestra tick`" in out
     assert "host scheduler" in out
-    assert "nested Bubblewrap" in out
+    assert "transient user systemd service" in out
 
 
 def test_root_defaults_to_none(monkeypatch):

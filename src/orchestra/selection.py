@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import TypeVar
 
 from orchestra.issue import Issue
@@ -18,13 +17,20 @@ ProjectType = TypeVar("ProjectType")
 
 
 def pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    return True
+    try:
+        stat = open(f"/proc/{pid}/stat").read()
+        state = stat[stat.rindex(")") + 1:].split()[0]
+    except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError, IndexError):
+        return False
+    return state != "Z"
 
 
 def process_start_time(pid: int) -> str | None:
@@ -48,13 +54,7 @@ def process_start_time(pid: int) -> str | None:
 
 
 def worker_alive(handle) -> bool:
-    """Return worker liveness across engine invocations and PID namespaces.
-
-    New workers own a durable completion marker written by their wrapper. Legacy handles
-    fall back to PID identity until drained.
-    """
-    if handle.completion_file:
-        return not Path(handle.completion_file).exists()
+    """Return supervisor liveness while guarding against PID reuse."""
     return pid_alive(handle.pid) and (
         handle.proc_start == "" or process_start_time(handle.pid) == handle.proc_start
     )

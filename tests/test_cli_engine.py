@@ -1,4 +1,3 @@
-import sys
 import time
 from pathlib import Path
 
@@ -14,14 +13,15 @@ CONFIG = f"""\
 slots: 5
 retries_cap: 2
 roles:
-  validator: {{ provider: fake, model: m, prompt: prompts/validator.md }}
-  worker:    {{ provider: fake, model: m, prompt: prompts/worker.md }}
-  verifier:  {{ provider: fake, model: m, prompt: prompts/verify-review.md }}
-providers:
+  validator: {{ harness: fake, model: m, prompt: prompts/validator.md }}
+  worker:    {{ harness: fake, model: m, prompt: prompts/worker.md }}
+  verifier:  {{ harness: fake, model: m, prompt: prompts/verify-review.md }}
+harnesses:
   fake:
-    argv: ["{sys.executable}", "{FAKE}", "--role", "{{role}}", "--result-file", "{{result_file}}"]
-    prompt: stdin
-sandbox: {{ enabled: false, argv_prefix: [] }}
+    kind: codex
+    executable: "{FAKE}"
+    preflight: false
+sandbox: {{ enabled: false }}
 """
 
 
@@ -40,7 +40,7 @@ def _setup(root: Path):
     (root / "config.yaml").write_text(CONFIG)
     (root / "prompts").mkdir()
     for n in ("validator.md", "worker.md", "verify-review.md"):
-        (root / "prompts" / n).write_text("do {issue} -> {result_file}\n")
+        (root / "prompts" / n).write_text("do {issue}\n")
     repo = root / "projects" / "wf"
     repo.mkdir(parents=True)
     for a in (["init", "-b", "main"], ["config", "user.email", "t@t.com"],

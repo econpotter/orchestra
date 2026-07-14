@@ -20,31 +20,27 @@ Read the project's `AGENTS.md`. It states the **lifecycle stage** — follow it 
 If unstated, treat the project as development.
 
 ## Implement as a converging lead
-Implement directly unless your harness exposes in-run subagents or task delegation tools
-that can complete before this process exits. For multi-step work, decompose the task into
-small internal steps, implement them, then run a fresh adversarial self-review against the
-acceptance criteria. Iterate implement -> review -> fix until the review finds nothing
-material.
+For multi-step work, decompose the task. When your harness exposes in-run subagents or task
+delegation, use them for independent investigation, implementation, and review steps. Then
+run a fresh adversarial self-review against every acceptance criterion. Iterate implement ->
+review -> fix until the review finds nothing material.
 
 Satisfy every acceptance criterion, match the surrounding code's style, and stay strictly
 in scope: do only this issue.
 
-## Single run — everything completes now
-You run ONCE, non-interactively. There is no next turn to resume you. Everything must
-finish within this run:
+## Supervised execution
+Orchestra supervises this non-interactive attempt and may resume the same durable harness
+session after a provider interruption or configured time limit.
 - Run every shell/build/data command **synchronously to completion**. Do NOT background a
-  long command and then wait for a completion notification, and do NOT schedule a wakeup or
-  await any external event — the process exits at end of turn and that work is lost, leaving
-  the issue stuck with no commit and no result.
+  long command and infer completion from silence.
 - A long shell call may yield control with a session ID after its foreground wait expires.
   This does not mean the process was terminated. Poll that same session with the harness's
   continuation/write-stdin tool until it reports an exit status. Do not start dependent work,
   infer a timeout from missing output, or report blocked while a required session is still
   running.
-- Subagents (Agent/Task tool) are fine — they complete within this run; that is the intended
-  way to parallelize the plan.
-- If a required task genuinely cannot finish in one run, do NOT park waiting for it: stop and
-  report blocked with the reason. Honest failure beats a silent hang.
+- A quiet, still-running command is not a failure. Keep observing it through the harness.
+- Do not stop merely because the task is long; the supervisor owns wall-time policy and
+  bounded resume.
 
 ## Self-gate, then commit
 Run these verification commands; ALL must pass before you declare done:
@@ -58,14 +54,9 @@ queue.
 - Soft decision with a safe default: proceed, and record it in the `decisions` field.
 - Genuinely stuck (missing context, won't build, needs an answer): stop and report blocked.
 
-## Report
-Your prose is ignored by orchestra. The engine reads only the JSON result file; no file
-means the issue gets stuck even if the work is otherwise correct. Before you finish, write
-a JSON result file to {result_file} with exactly these keys:
-- `result`: "committed" if you committed working code, else "blocked"
-- `decisions`: a short log of soft decisions (empty string if none)
-- `blocked_reason`: if blocked, a one-line reason (empty string otherwise)
-
-The commit on {branch} is the authoritative signal you did the work — always commit
-before writing a "committed" result. Writing {result_file} is the mandatory final action
-of the run.
+## Structured final response
+Return the final JSON object required by the harness-provided schema. Orchestra captures and
+validates it; do not create or edit Orchestra control-plane files. Use outcome `committed`
+only after the commit exists. Otherwise use `blocked` with a stable `failure_category`,
+concrete `evidence`, and `requires_human` set accurately. Record soft decisions in
+`decisions`. The commit and structured response must agree.

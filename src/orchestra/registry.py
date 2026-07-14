@@ -19,13 +19,13 @@ class WorkerHandle:
     branch: str
     worktree: str
     pid: int
-    log: str
-    result_file: str
+    attempt_id: str
+    manifest: str
+    stdout: str
+    stderr: str
     started: str
     start_sha: str
     proc_start: str
-    completion_file: str = ""
-    stop_file: str = ""
 
 
 def load_registry(path: str | Path) -> dict[str, WorkerHandle]:

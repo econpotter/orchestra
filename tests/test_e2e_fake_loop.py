@@ -18,16 +18,17 @@ CONFIG = f"""\
 slots: 5
 retries_cap: 2
 roles:
-  validator: {{ provider: fake, model: m, prompt: prompts/validator.md }}
-  worker:    {{ provider: fake, model: m, prompt: prompts/worker.md }}
-  verifier:  {{ provider: fake, model: m, prompt: prompts/verify-review.md }}
-providers:
+  validator: {{ harness: fake, model: m, prompt: prompts/validator.md }}
+  worker:    {{ harness: fake, model: m, prompt: prompts/worker.md }}
+  verifier:  {{ harness: fake, model: m, prompt: prompts/verify-review.md }}
+harnesses:
   fake:
-    argv: ["{sys.executable}", "{FAKE}", "--role", "{{role}}", "--result-file", "{{result_file}}"]
-    prompt: stdin
-sandbox: {{ enabled: true, argv_prefix: [] }}
+    kind: codex
+    executable: "{FAKE}"
+    preflight: false
+sandbox: {{ enabled: false }}
 validate:
-  semantic: true
+  semantic: false
 """
 
 PROJECTS = "# Projects\n\n## wf\n- Path: projects/wf\n- Branch: main\n- Purpose: t\n- Queue: queue/wf.md\n- Focus: none\n"
@@ -50,7 +51,7 @@ def _setup(root: Path):
     (root / "config.yaml").write_text(CONFIG)
     (root / "prompts").mkdir()
     for name in ("validator.md", "worker.md", "verify-review.md"):
-        (root / "prompts" / name).write_text("do {issue} -> {result_file}\n")
+        (root / "prompts" / name).write_text("do {issue}\n")
     (root / "projects" / "wf" / "docs" / "specs").mkdir(parents=True)
     (root / "projects" / "wf" / "docs" / "specs" / "x.md").write_text("spec")
     repo = root / "projects" / "wf"

@@ -37,3 +37,15 @@ def test_worker_prompt_requires_polling_yielded_commands():
     assert "session ID" in prompt
     assert "poll" in prompt.lower()
     assert "does not mean the process was terminated" in prompt
+
+
+def test_instruction_bundle_captures_boundary_and_project_without_duplicate_symlink(tmp_path):
+    from orchestra.prompting import resolve_instruction_bundle
+    (tmp_path / "AGENTS.md").write_text("global rules")
+    worktree = tmp_path / ".orchestra" / "worktrees" / "p-001"
+    worktree.mkdir(parents=True)
+    (worktree / "AGENTS.md").write_text("project rules")
+    (worktree / "CLAUDE.md").symlink_to(worktree / "AGENTS.md")
+    bundle = resolve_instruction_bundle(worktree, boundary=tmp_path)
+    assert "global rules" in bundle
+    assert bundle.count("project rules") == 1

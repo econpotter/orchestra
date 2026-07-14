@@ -13,15 +13,3 @@ def archive_file(root: str | Path, project: str) -> Path:
 
 def worktree_dir(root: str | Path, project: str, number: int) -> Path:
     return Path(root) / ".orchestra" / "worktrees" / f"{project}-{number:03d}"
-
-
-def result_file(root: str | Path, project: str, number: int) -> Path:
-    return Path(root) / ".orchestra" / "results" / f"{project}#{number:03d}.json"
-
-
-def completion_file(root: str | Path, project: str, number: int) -> Path:
-    return Path(root) / ".orchestra" / "results" / f"{project}#{number:03d}.exit.json"
-
-
-def stop_file(root: str | Path, project: str, number: int) -> Path:
-    return Path(root) / ".orchestra" / "results" / f"{project}#{number:03d}.stop"

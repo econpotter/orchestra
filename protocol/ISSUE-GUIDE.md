@@ -27,8 +27,8 @@ Acceptance:
   but at least one of the two is required. The file must exist.
 - **Depends On** — comma list of issue numbers, or `null`.
 - **Acceptance** — ≥1 checkbox; each criterion must be mechanically verifiable.
-- **Decisions / Blocked Reason** — free text, written by agents via result files,
-  applied by reconcile.
+- **Decisions / Blocked Reason** — free text derived by reconcile from validated structured
+  role results and durable attempt evidence.
 
 ## Promotion is a human act
 Nothing enters a queue without a human blessing it. That promotion is the boundary

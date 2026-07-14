@@ -70,10 +70,16 @@ def test_kill(tmp_path, capsys):
     save_registry(tmp_path / ".orchestra" / "workers.json", {
         issue_key("wf", 1): WorkerHandle(
             project="wf", number=1, role="worker", branch="issue/001-thing",
-            worktree=str(tmp_path), pid=os.getpid(), log=str(tmp_path / "l.log"),
-            result_file=str(tmp_path / "r.json"), started="t", start_sha="", proc_start="",
+            worktree=str(tmp_path), pid=os.getpid(), attempt_id="a1",
+            manifest=str(tmp_path / ".orchestra/attempts/a1/manifest.json"),
+            stdout=str(tmp_path / ".orchestra/attempts/a1/stdout.jsonl"),
+            stderr=str(tmp_path / ".orchestra/attempts/a1/stderr.log"),
+            started="t", start_sha="", proc_start="",
         )
     })
+    attempt_dir = tmp_path / ".orchestra" / "attempts" / "a1"
+    attempt_dir.mkdir(parents=True)
+    (attempt_dir / "manifest.json").write_text('{"attempt_id":"a1"}')
     # don't actually kill the test process: use a sleeping child instead
     proc = subprocess.Popen(["sleep", "30"])
     reg = load_registry(tmp_path / ".orchestra" / "workers.json")
@@ -82,8 +88,10 @@ def test_kill(tmp_path, capsys):
 
     rc = main(["--root", str(tmp_path), "kill", "wf", "1"])
     assert rc == 0
-    assert find_issue(read_queue(tmp_path / "queue" / "wf.md"), 1).status == "blocked"
-    assert load_registry(tmp_path / ".orchestra" / "workers.json") == {}
+    assert (attempt_dir / "stop").exists()
+    assert find_issue(read_queue(tmp_path / "queue" / "wf.md"), 1).status == "in_progress"
+    assert load_registry(tmp_path / ".orchestra" / "workers.json")
+    proc.terminate()
     proc.wait(timeout=5)
 
 

@@ -7,8 +7,10 @@ def _handle(n: int) -> WorkerHandle:
     return WorkerHandle(
         project="wf", number=n, role="worker", branch=f"issue/{n:03d}-x",
         worktree=f".orchestra/worktrees/wf-{n:03d}", pid=1000 + n,
-        log=f".orchestra/logs/wf#{n:03d}.log",
-        result_file=f".orchestra/results/wf#{n:03d}.json", started="2026-06-26T00:00:00Z",
+        attempt_id=f"a{n}", manifest=f".orchestra/attempts/a{n}/manifest.json",
+        stdout=f".orchestra/attempts/a{n}/stdout.jsonl",
+        stderr=f".orchestra/attempts/a{n}/stderr.log",
+        started="2026-06-26T00:00:00Z",
         start_sha="abc123",
         proc_start="999",
     )

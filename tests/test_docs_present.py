@@ -31,7 +31,8 @@ def test_prompts_are_filled_not_stubs():
     for name in ("validator.md", "worker.md", "verify-review.md"):
         text = (root / "prompts" / name).read_text()
         assert "Stub — filled in Phase B" not in text, f"{name} still a stub"
-        assert "{result_file}" in text, f"{name} must reference its result file"
+        assert "harness-provided schema" in text
+        assert "{result_file}" not in text
 
 
 def test_operations_doc_describes_engine():
@@ -48,7 +49,7 @@ def test_worker_prompt_decompose_and_lifecycle():
     low = text.lower()
     assert "subagent" in low                 # decompose-or-direct
     assert "agents.md" in low                 # reads project lifecycle policy
-    assert "{result_file}" in text
+    assert "structured final response" in low
     assert "{verifier_feedback}" in text
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# tests/fake_agent.py — simulated agent for deterministic engine tests.
+"""Codex-protocol fake used by dispatch/reconcile integration tests."""
 import argparse
 import json
 import os
@@ -8,62 +8,67 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_MODE = {"worker": "commit", "validator": "validated", "verifier": "accept"}
-
-
-def _write(result_file: str, result: str, decisions: str = "", blocked_reason: str = "") -> None:
-    p = Path(result_file)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(
-        {"result": result, "decisions": decisions, "blocked_reason": blocked_reason}
-    ))
-
 
 def _commit(cwd: Path) -> None:
-    fname = cwd / "fake_work.txt"
-    fname.write_text("work\n")
-    subprocess.run(["git", "-C", str(cwd), "add", "fake_work.txt"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(cwd), "commit", "-m", "fake work"], check=True, capture_output=True)
+    (cwd / "fake_work.txt").write_text("work\n")
+    subprocess.run(["git", "add", "fake_work.txt"], cwd=cwd, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "commit", "-m", "fake work"], cwd=cwd, check=True,
+                   capture_output=True)
+
+
+def _role(schema_path: str) -> str:
+    outcomes = json.loads(Path(schema_path).read_text())["properties"]["outcome"]["enum"]
+    if "committed" in outcomes:
+        return "worker"
+    if "validated" in outcomes:
+        return "validator"
+    return "verifier"
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--role", required=True)
-    ap.add_argument("--result-file", required=True)
-    args = ap.parse_args()
-    sys.stdin.read()  # drain the piped prompt
-
-    mode = os.environ.get("ORCHESTRA_FAKE_MODE") or DEFAULT_MODE[args.role]
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--output-schema", required=True)
+    parser.add_argument("--output-last-message", required=True)
+    args, _ = parser.parse_known_args()
+    sys.stdin.read()
+    role = _role(args.output_schema)
+    defaults = {"worker": "commit", "validator": "validated", "verifier": "accept"}
+    mode = os.environ.get("ORCHESTRA_FAKE_MODE", defaults[role])
     if mode == "sleep":
         time.sleep(3)
-        mode = DEFAULT_MODE[args.role]
+        mode = defaults[role]
 
-    cwd = Path.cwd()
-    if args.role == "worker":
-        if mode == "commit":
-            _commit(cwd)
-            _write(args.result_file, "committed", decisions="fake decision")
-        elif mode == "blocked":
-            _write(args.result_file, "blocked", blocked_reason="stuck: fake")
-        elif mode == "crash":
-            return 1
-        elif mode == "session_limit":
-            print("API session limit reached", file=sys.stderr)
-            return 1
-    elif args.role == "validator":
-        if mode == "validated":
-            _write(args.result_file, "validated")
-        elif mode == "blocked":
-            _write(args.result_file, "blocked", blocked_reason="invalid: fake")
-        else:
-            raise ValueError(f"unknown mode {mode!r} for role validator")
-    elif args.role == "verifier":
-        if mode == "accept":
-            _write(args.result_file, "accept")
-        elif mode == "reject":
-            _write(args.result_file, "reject", decisions="retry: fake complaint")
-        elif mode == "crash":
-            return 1
+    print(json.dumps({"type": "thread.started", "thread_id": "fake-thread"}), flush=True)
+    print(json.dumps({"type": "turn.started"}), flush=True)
+    if mode in {"crash", "session_limit"}:
+        message = "API usage limit reached" if mode == "session_limit" else "fake crash"
+        print(json.dumps({"type": "turn.failed", "error": message}), flush=True)
+        return 1
+
+    if role == "worker" and mode == "commit":
+        _commit(Path.cwd())
+        outcome, decisions = "committed", "fake decision"
+    elif role == "validator" and mode == "validated":
+        outcome, decisions = "validated", ""
+    elif role == "verifier" and mode == "accept":
+        outcome, decisions = "accept", ""
+    elif role == "verifier" and mode == "reject":
+        outcome, decisions = "reject", "retry: fake complaint"
+    else:
+        outcome, decisions = "blocked", ""
+    failed = outcome == "blocked"
+    result = {
+        "schema_version": 1, "outcome": outcome, "decisions": decisions,
+        "failure_category": "needs_human" if failed else "",
+        "evidence": "stuck: fake" if failed else "fake evidence",
+        "requires_human": failed,
+    }
+    Path(args.output_last_message).write_text(json.dumps(result))
+    print(json.dumps({"type": "item.completed", "item": {
+        "type": "agent_message", "text": json.dumps(result),
+    }}), flush=True)
+    print(json.dumps({"type": "turn.completed", "usage": {"output_tokens": 1}}), flush=True)
     return 0
 
 

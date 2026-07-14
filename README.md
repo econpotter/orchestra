@@ -95,25 +95,29 @@ Workspace resolution order is explicit `--root`, `ORCHESTRA_ROOT`,
 
 ## Configure a harness
 
-Start from `config.example.yaml`. Its provider argument vectors show a Codex setup; Claude
-can be configured with its own executable, model, and prompt transport. Each role names the
-harness configuration and model it should use. Harness executables must already be installed,
-authenticated, and available on the scheduler's `PATH`.
+Start from `config.example.yaml`. Each role names a supervised harness and model. Orchestra's
+Codex and Claude adapters own the required structured-event and native-result-schema flags;
+do not copy CLI argument vectors into configuration. Harness executables must already be
+installed, authenticated, and available on the scheduler's `PATH`.
 
 A current Claude process configuration is:
 
 ```yaml
-providers:
+harnesses:
   claude:
-    argv: ["claude", "-p", "--model", "{model}", "--dangerously-skip-permissions"]
-    prompt: stdin
+    kind: claude
+    executable: claude
+    reasoning_effort: high
+    sandbox: danger-full-access
+    attempts_cap: 3
 ```
 
-Set `roles.<role>.provider: claude` and choose the corresponding Claude model for each role.
-The autonomy flag is appropriate only inside an execution boundary you trust; use the
-workspace's `sandbox` configuration when filesystem confinement is required.
+Set `roles.<role>.harness: claude` and choose the corresponding Claude model. The adapter
+preflights the installed CLI and fails loudly if required protocol flags are missing. The
+`danger-full-access` setting is appropriate only inside an execution boundary you trust;
+enable the workspace's outer `sandbox` when filesystem confinement is required.
 
-The planned supervised adapters, evidence contract, and current rollout status are documented
+The supervised adapters and evidence contract are documented
 in [`protocol/HARNESS-RELIABILITY.md`](protocol/HARNESS-RELIABILITY.md). Do not configure Pi
 as if it were an implemented, verified harness.
 

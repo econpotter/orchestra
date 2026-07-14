@@ -26,9 +26,13 @@ def test_pause_resume_sentinel(tmp_path, capsys):
 
 def test_logs_prints_file(tmp_path, capsys):
     _setup(tmp_path)
-    log = tmp_path / ".orchestra" / "logs" / "wf#001.log"
-    log.parent.mkdir(parents=True)
-    log.write_text("hello-log\n")
+    from orchestra.attempt import AttemptStore
+    attempt = AttemptStore(tmp_path).create(
+        attempt_id="a1", project="wf", number=1, role="worker", harness="codex",
+        model="m", worktree=tmp_path, branch="b", start_commit="a", prompt="p",
+        instruction_bundle="", configuration={}, capabilities={}, parent_attempt=None,
+    )
+    attempt.stdout_path.write_text("hello-log\n")
     rc = main(["--root", str(tmp_path), "logs", "wf", "1"])
     assert rc == 0
     assert "hello-log" in capsys.readouterr().out

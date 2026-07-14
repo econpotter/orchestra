@@ -27,22 +27,23 @@ in Phase B; the deterministic helpers below are Phase A.)
 - `tools/dispatch --root ROOT` — status→agent router. Reads every project's queue,
   selects eligible issues (`role_for_issue`: status routable, no active handle,
   dependencies done) up to `config.slots`, lowest Priority first. Creates a worktree
-  for first-time workers, launches a detached agent via the config `providers`
-  adapter, and records a handle in `.orchestra/workers.json`. **Writes only
+  for first-time workers, creates a durable attempt manifest, launches the supervised
+  configured harness, and records its attempt ID in `.orchestra/workers.json`. **Writes only
   workers.json — never the queue.** Routing: open→validator, validated|needs_rework→
   worker, committed→verifier.
 - `tools/reconcile --root ROOT` — the **sole writer** of `queue/`. For each handle:
-  live worker → stamp `in_progress`; exited → classify by role + result file +
-  commit and apply the terminal transition; stalled (config `stall.idle_minutes`>0
-  and log idle) → kill + `blocked`. Removes finished handles and consumed result
-  files. `Retries` counts verify↔worker bounces; reject under `retries_cap` →
+  live worker → stamp `in_progress`; exited → consume only the finalized attempt manifest,
+  canonical structured result, and Git evidence, then apply the role truth table. Removes
+  finished handles but retains every attempt artifact. `Retries` counts verify↔worker
+  bounces; reject under `retries_cap` →
   needs_rework (Retries++), at cap → awaiting_review with the verifier's complaints
   in `### Verifier Feedback`.
-- Agents report via JSON result files in `.orchestra/results/` (schema:
-  `{result, decisions, blocked_reason}`); the commit on the branch is authoritative.
-- Provider specifics (the `claude -p` invocation, autonomy flags, optional sandbox
-  wrapper) live entirely in `config.yaml` (`providers:` / `sandbox:`). Swapping to
-  Codex is a config change, not a code change.
+- Codex and Claude return Orchestra-owned role schemas through their native structured-output
+  interfaces. The supervisor stores raw stdout JSONL, raw stderr, normalized events, provider
+  output, and canonical result separately under `.orchestra/attempts/<attempt-id>/`.
+- Harness-specific CLI flags live in the Codex and Claude adapters. Configuration selects a
+  harness, model, effort, bounded attempt policy, execution limits, and optional outer
+  sandbox; reconciliation remains harness-independent.
 
 **Validation is deterministic by default.** `validate_structural` (title, ≥1 acceptance,
 known deps, and that any referenced Plan/Spec exists in the project's **base branch** —
@@ -70,8 +71,8 @@ A **tick** is one `dispatch` then `reconcile`:
   (`journalctl --user -u orchestra.service`).
   - **systemd gotchas the shipped unit handles (keep them):** `KillMode=process` — a
     oneshot's default cgroup kill reaps the detached agents the instant `tick` exits, so
-    they die mid-run (logged as "crash: no new commit and no result"). `Environment=PATH=…`
-    — user services get a minimal PATH; it must include the provider CLI (claude/codex) and
+    they die mid-run. `Environment=PATH=…` — user services get a minimal PATH; it must include
+    the harness CLI (claude/codex) and
     the tools agents run (uv, git, node) — e.g. `~/.local/bin` plus nvm/cargo bins (find
     them with `command -v claude uv git node`). Without it every tick crashes
     `FileNotFoundError: 'claude'`.
@@ -94,17 +95,13 @@ hour of wall-clock once it starts, plus the worker's own run time. Tighten the i
 for faster pickup at the cost of more git/file churn; the agents themselves run detached
 across many ticks regardless.
 
-## Harnesses and providers (Phase C)
-Launch mechanics currently live in the workspace's `config.yaml` under `providers:`; core
-code does not hard-code executable flags. Claude and Codex are the supported harness targets.
-For each role, set both `roles.<role>.provider` and `roles.<role>.model`, then define the
-selected executable's `argv` template and `prompt: stdin|arg` transport. Model names differ
-between harnesses.
-
-The reliability design evolves this opaque provider process into supervised, harness-specific
-Claude and Codex adapters while keeping lifecycle policy provider-independent. `PiJsonAdapter`
-is a design sketch only: Pi has no implemented or verified harness integration yet. See
-`HARNESS-RELIABILITY.md` for the capability contract and rollout status.
+## Harnesses
+Launch mechanics live under `harnesses:`. For each role, set `roles.<role>.harness` and
+`roles.<role>.model`. Codex and Claude are implemented. Their adapters preflight the CLI,
+isolate user configuration, request structured events and a native result schema, preserve a
+durable session ID, and support bounded resume. Required role capabilities are configuration
+data and are validated before dispatch. `PiJsonAdapter` remains a design sketch only; Pi has
+no executable integration or rollout gate. See `HARNESS-RELIABILITY.md`.
 
 ## Control surface (Phase E)
 The `orchestra` CLI is the human/agent entrypoint (the `tools/*` scripts remain for

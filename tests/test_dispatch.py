@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import time
+import json
 from pathlib import Path
 
 from orchestra.config import load_config
@@ -15,16 +16,17 @@ CONFIG = f"""\
 slots: 5
 retries_cap: 2
 roles:
-  validator: {{ provider: fake, model: m, prompt: prompts/validator.md }}
-  worker:    {{ provider: fake, model: m, prompt: prompts/worker.md }}
-  verifier:  {{ provider: fake, model: m, prompt: prompts/verify-review.md }}
-providers:
+  validator: {{ harness: fake, model: m, prompt: prompts/validator.md }}
+  worker:    {{ harness: fake, model: m, prompt: prompts/worker.md }}
+  verifier:  {{ harness: fake, model: m, prompt: prompts/verify-review.md }}
+harnesses:
   fake:
-    argv: ["{sys.executable}", "{FAKE}", "--role", "{{role}}", "--result-file", "{{result_file}}"]
-    prompt: stdin
+    kind: codex
+    executable: "{FAKE}"
+    preflight: false
 sandbox:
   enabled: true
-  argv_prefix: []
+  kind: systemd
 validate:
   semantic: true
 """
@@ -106,38 +108,18 @@ def test_dispatch_validated_issue_creates_worktree_and_worker(tmp_path: Path):
     _wait_all_dead(tmp_path)
 
 
-def test_dispatch_does_not_pass_network_to_launch(tmp_path: Path, monkeypatch):
-    # The sandbox is filesystem-confinement only and always shares the network (the agent
-    # needs its model API), so the per-issue Network flag no longer reaches launch(). Guard
-    # that dispatch calls launch with the current signature (no `network` kwarg), whatever
-    # the issue's Network value.
-    from orchestra import dispatch as dispatch_mod
-
-    seen: dict = {}
-
-    def _fake_launch(provider, sandbox, context, *, prompt_text, cwd, log_path, **kwargs):
-        seen[context["issue"]] = True
-        return 4321
-
-    monkeypatch.setattr(dispatch_mod, "launch", _fake_launch)
-
+def test_dispatch_does_not_add_network_gate_to_attempt(tmp_path: Path):
     _setup(tmp_path, _issue(3, "validated"))
     cfg = load_config(tmp_path / "config.yaml")
     dispatch(tmp_path, cfg, started="2026-06-26T00:00:00Z")
 
-    assert seen["003"] is True
+    handle = load_registry(tmp_path / ".orchestra" / "workers.json")[issue_key("wf", 3)]
+    manifest = json.loads(Path(handle.manifest).read_text())
+    assert "network" not in manifest["configuration"]
+    _wait_all_dead(tmp_path)
 
 
-def test_dispatch_passes_project_ro_seeds_to_launch(tmp_path: Path, monkeypatch):
-    from orchestra import dispatch as dispatch_mod
-
-    seen = []
-
-    def _fake_launch(provider, sandbox, context, *, read_only_binds, **kwargs):
-        seen.extend(read_only_binds)
-        return 4321
-
-    monkeypatch.setattr(dispatch_mod, "launch", _fake_launch)
+def test_dispatch_records_project_ro_seeds_in_attempt(tmp_path: Path):
     _setup(tmp_path, _issue(3, "validated"))
     projects = (tmp_path / "PROJECTS.md").read_text().replace(
         "- Focus: none\n", "- Worktree-Seed: data/raw:ro-link\n- Focus: none\n"
@@ -149,7 +131,12 @@ def test_dispatch_passes_project_ro_seeds_to_launch(tmp_path: Path, monkeypatch)
     cfg = load_config(tmp_path / "config.yaml")
     dispatch(tmp_path, cfg, started="2026-06-26T00:00:00Z")
 
-    assert seen == [(raw.resolve(), raw.resolve())]
+    handle = load_registry(tmp_path / ".orchestra" / "workers.json")[issue_key("wf", 3)]
+    manifest = json.loads(Path(handle.manifest).read_text())
+    assert manifest["configuration"]["read_only_binds"] == [
+        [str(raw.resolve()), str(raw.resolve())]
+    ]
+    _wait_all_dead(tmp_path)
 
 
 def test_dispatch_respects_slots(tmp_path: Path):
@@ -175,11 +162,11 @@ DISPATCH_TOOL = REPO_ROOT / "tools" / "dispatch"
 BAD_CONFIG = """\
 slots: 2
 roles:
-  validator: { provider: claude, model: m, prompt: prompts/validator.md }
-  worker:    { provider: nonexistent, model: m, prompt: prompts/worker.md }
-  verifier:  { provider: claude, model: m, prompt: prompts/verify-review.md }
-providers:
-  claude: { argv: ["claude"], prompt: stdin }
+  validator: { harness: claude, model: m, prompt: prompts/validator.md }
+  worker:    { harness: nonexistent, model: m, prompt: prompts/worker.md }
+  verifier:  { harness: claude, model: m, prompt: prompts/verify-review.md }
+harnesses:
+  claude: { kind: claude, executable: claude }
 """
 
 
@@ -209,8 +196,8 @@ def test_build_context_includes_title_and_acceptance():
     from orchestra.config import Config
     from pathlib import Path
     cfg = Config(
-        slots=1, roles={}, validate_semantic=True, stall_idle_minutes=0,
-        providers={}, sandbox=None, retries_cap=2,
+        slots=1, roles={}, validate_semantic=True,
+        harnesses={}, sandbox=None, retries_cap=2,
         workflows={}, verify_rerun_checks=False, autoapprove=False,
         template_path="projects/project-template",
     )
@@ -222,7 +209,7 @@ def test_build_context_includes_title_and_acceptance():
     project = Project(name="wf", path="projects/wf", branch="main", queue="queue/wf.md",
                       purpose="", focus="", workflow="python")
     ctx = build_context(".", project, issue, "worker",
-                        workdir=Path("/wt"), result_file_path=Path("/r.json"), model="m", config=cfg)
+                        workdir=Path("/wt"), model="m", config=cfg)
     assert ctx["title"] == "add retry"
     assert "- [ ] retries 5xx" in ctx["acceptance"]
     assert "- [x] tests green" in ctx["acceptance"]
@@ -235,8 +222,8 @@ def test_build_context_workflow_decisions_and_role_paths():
     from orchestra.config import Config
     from pathlib import Path
     cfg = Config(
-        slots=1, roles={}, validate_semantic=True, stall_idle_minutes=0,
-        providers={}, sandbox=None, retries_cap=2,
+        slots=1, roles={}, validate_semantic=True,
+        harnesses={}, sandbox=None, retries_cap=2,
         workflows={"python": {"test": "uv run pytest"}}, verify_rerun_checks=False,
         autoapprove=False, template_path="projects/project-template",
     )
@@ -249,9 +236,9 @@ def test_build_context_workflow_decisions_and_role_paths():
     project = Project(name="wf", path="projects/wf", branch="main",
                       queue="queue/wf.md", purpose="", focus="", workflow="python")
     worker_ctx = build_context(".", project, issue, "worker", workdir=Path("/wt"),
-                               result_file_path=Path("/r.json"), model="m", config=cfg)
+                               model="m", config=cfg)
     val_ctx = build_context(".", project, issue, "validator", workdir=Path("/wt"),
-                            result_file_path=Path("/r.json"), model="m", config=cfg)
+                            model="m", config=cfg)
     assert worker_ctx["plan"] == "docs/plans/x.md"            # as-is for worker
     assert val_ctx["plan"] == "projects/wf/docs/plans/x.md"   # prefixed for validator
     assert worker_ctx["spec"] == "docs/specs/y.md"            # as-is for worker
@@ -278,16 +265,17 @@ workflows:
   python:
     test: uv run pytest
 roles:
-  validator: {{ provider: fake, model: m, prompt: prompts/validator.md }}
-  worker:    {{ provider: fake, model: m, prompt: prompts/worker.md }}
-  verifier:  {{ provider: fake, model: m, prompt: prompts/verify-review.md }}
-providers:
+  validator: {{ harness: fake, model: m, prompt: prompts/validator.md }}
+  worker:    {{ harness: fake, model: m, prompt: prompts/worker.md }}
+  verifier:  {{ harness: fake, model: m, prompt: prompts/verify-review.md }}
+harnesses:
   fake:
-    argv: ["{sys.executable}", "{FAKE}", "--role", "{{role}}", "--result-file", "{{result_file}}"]
-    prompt: stdin
+    kind: codex
+    executable: "{FAKE}"
+    preflight: false
 sandbox:
   enabled: true
-  argv_prefix: []
+  kind: systemd
 """
     projects_text = """\
 # Projects
@@ -386,17 +374,20 @@ def test_dispatch_isolates_per_issue_launch_failure(tmp_path, monkeypatch):
     cfg = load_config(tmp_path / "config.yaml")
 
     calls = {"n": 0}
+    real_launch = d._start_supervisor
 
     def flaky_launch(*a, **k):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise FileNotFoundError("simulated missing provider binary")
-        return 999999  # fake pid for the second launch
+            raise FileNotFoundError("simulated supervisor launch failure")
+        return real_launch(*a, **k)
 
-    monkeypatch.setattr(d, "launch", flaky_launch)
+    monkeypatch.setattr(d, "_start_supervisor", flaky_launch)
 
     launched = d.dispatch(tmp_path, cfg, started="t")  # must NOT raise
 
     assert len(launched) == 1  # one failed, the other went through
     reg = load_registry(tmp_path / ".orchestra" / "workers.json")
-    assert len(reg) == 1  # registry persisted the successful launch (saved in finally)
+    assert len(reg) == 2  # failed attempt is also durable so reconcile can classify it
+    assert any(handle.pid == 0 for handle in reg.values())
+    _wait_all_dead(tmp_path)

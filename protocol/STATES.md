@@ -33,18 +33,13 @@ needs_rework --retry cap hit--> awaiting_review
 ```
 `Retries` counts only verify↔worker bounces. Verifier feedback (`### Verifier Feedback`) carries reject complaints and is included in the issue when a worker bounces.
 
-## Crash-retry
-A **crash** is unambiguous: the agent process is dead **and** wrote no result file (a
-self-reported block writes a result with `### Blocked Reason`, so it is never a crash). The
-work itself is intact — a worker's commit is on its branch; a verifier only reads a
-committed diff — so `reconcile` re-queues a crashed agent to its prior dispatchable state
-instead of blocking, bounded by `crash_retries_cap` (config, default 2):
-
-| Crashed role | Re-queue to |
-|---|---|
-| validator | `open` (re-validate) |
-| worker (no commit) | `validated`, or `needs_rework` if `Retries>0` — or `held` when both `Network: true` and `hold_network_issues: true` |
-| verifier | `committed` (re-verify) |
+## Attempt recovery
+Every harness execution finalizes a durable attempt manifest. Reconcile derives recovery from
+its structured failure category, session capability, Git evidence, and bounded attempt count;
+it never scrapes prose logs. Provider quota/upstream interruptions and configured time limits
+resume the same durable session when possible. Harness/protocol/environment failures receive a
+bounded fresh attempt. Authentication, acceptance, human-required, and intentional
+cancellation failures block without retry. A worker result and branch delta must agree.
 
 `Crash-Retries` (issue field) counts these bounces and resets to 0 whenever the issue
 reaches a terminal via a real result (worker commit, verifier accept/reject), so the cap

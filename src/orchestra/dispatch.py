@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import json
+import hashlib
 import sys
+import subprocess
+import uuid
+import shutil
+from dataclasses import asdict
 from pathlib import Path
 
 from orchestra import git_ops, layout
-from orchestra.adapter import launch
+from orchestra.attempt import AttemptStore
 from orchestra.config import Config, validate_config
 from orchestra.enginelock import engine_lock
 from orchestra.issue import Issue, branch_name
 from orchestra.projects import Project, read_projects
-from orchestra.prompting import render_prompt
+from orchestra.harness import adapter_for, preflight_harness, role_schema
+from orchestra.prompting import render_prompt, resolve_instruction_bundle
 from orchestra.queue import read_queue
 from orchestra.worktree import prepare_read_only_binds, seed_worktree
 from orchestra.worktree_db import create_worktree_db
@@ -32,6 +39,14 @@ from orchestra.validate import validate_structural
 _LIVE_DONE_STATUSES = {"archived"}
 
 
+def _start_supervisor(root: Path, manifest: Path) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [sys.executable, "-m", "orchestra.supervisor", str(manifest)],
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, start_new_session=True, text=True,
+    )
+
+
 def done_numbers(root: str | Path, project: Project) -> set[int]:
     root = Path(root)
     nums: set[int] = set()
@@ -51,7 +66,6 @@ def build_context(
     role: str,
     *,
     workdir: Path,
-    result_file_path: Path,
     model: str,
     config: Config,
 ) -> dict:
@@ -68,8 +82,6 @@ def build_context(
         "model": model,
         "role": role,
         "workdir": str(workdir),
-        "result_file": str(result_file_path),
-        "results_dir": str(result_file_path.parent),
         "branch": branch_name(issue),
         "issue": f"{issue.number:03d}",
         "project": project.name,
@@ -145,6 +157,7 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
     try:
         for project, issue, role in chosen:
             key = issue_key(project.name, issue.number)
+            attempt = None
             try:
                 if role == "validator":
                     workdir = root
@@ -173,37 +186,84 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                             root / project.path / ".env", workdir / ".env", issue.number
                         )
                     start_sha = git_ops.branch_head(root / project.path, branch_name(issue))
-                rf = layout.result_file(root, project.name, issue.number)
-                completion = layout.completion_file(root, project.name, issue.number)
-                stop = layout.stop_file(root, project.name, issue.number)
-                for stale in (rf, completion, stop):
-                    if stale.exists():
-                        stale.unlink()
                 role_cfg = config.roles[role]
-                provider = config.providers[role_cfg.provider]
+                harness = config.harnesses[role_cfg.harness]
                 ctx = build_context(
                     root, project, issue, role,
-                    workdir=Path(workdir), result_file_path=rf, model=role_cfg.model,
-                    config=config,
+                    workdir=Path(workdir), model=role_cfg.model, config=config,
                 )
                 prompt_text = render_prompt(root, role_cfg.prompt, ctx)
-                log = root / ".orchestra" / "logs" / f"{key}.log"
-                pid = launch(
-                    provider, config.sandbox, ctx,
-                    prompt_text=prompt_text, cwd=Path(workdir), log_path=log,
-                    completion_path=completion, stop_path=stop,
-                    read_only_binds=read_only_binds,
+                instructions = resolve_instruction_bundle(workdir, boundary=root)
+                store = AttemptStore(root)
+                parent = store.latest(project.name, issue.number, role)
+                retry_parent = (parent if parent and parent.data.get("retry_disposition")
+                                in {"resume", "fresh_attempt"} else None)
+                attempt_id = f"{project.name}-{issue.number:03d}-{role}-{uuid.uuid4().hex[:12]}"
+                attempt_config = {
+                    "kind": harness.kind, "executable": harness.executable,
+                    "reasoning_effort": harness.reasoning_effort,
+                    "sandbox": harness.sandbox, "extra_args": harness.extra_args,
+                    "attempts_cap": harness.attempts_cap, "limits": asdict(harness.limits),
+                    "resume_session": (retry_parent.data.get("session_id", "")
+                                       if retry_parent and
+                                       retry_parent.data.get("retry_disposition") == "resume"
+                                       else ""),
+                    "dispatch_status": issue.status,
+                    "outer_sandbox_enabled": config.sandbox.enabled,
+                    "outer_sandbox_kind": config.sandbox.kind,
+                    "outer_sandbox_executable": config.sandbox.executable,
+                    "read_only_binds": [[str(source), str(target)]
+                                        for source, target in read_only_binds],
+                }
+                adapter = adapter_for(harness.kind)
+                attempt = store.create(
+                    attempt_id=attempt_id, project=project.name, number=issue.number,
+                    role=role, harness=harness.kind, model=role_cfg.model,
+                    worktree=Path(workdir), branch=branch_name(issue), start_commit=start_sha,
+                    prompt=prompt_text, instruction_bundle=instructions,
+                    configuration=attempt_config, capabilities=adapter.capabilities,
+                    parent_attempt=retry_parent.attempt_id if retry_parent else None,
                 )
+                schema_text = json.dumps(role_schema(role), indent=2)
+                attempt.schema_path.write_text(schema_text)
+                store.update(attempt, result_schema_sha256=hashlib.sha256(
+                    schema_text.encode()).hexdigest())
+                if harness.preflight:
+                    try:
+                        version = preflight_harness(harness.kind, harness.executable)
+                        executable_path = shutil.which(harness.executable) or harness.executable
+                        store.update(
+                            attempt, harness_version=version,
+                            harness_executable=str(Path(executable_path).resolve()),
+                            preflight="passed",
+                        )
+                    except Exception as exc:  # noqa: BLE001 - reconciler owns queue outcome
+                        store.update(attempt, preflight="failed", preflight_error=str(exc))
+                supervisor = _start_supervisor(root, attempt.path)
                 reg[key] = WorkerHandle(
                     project=project.name, number=issue.number, role=role,
-                    branch=branch_name(issue), worktree=str(workdir), pid=pid,
-                    log=str(log), result_file=str(rf), started=started,
-                    start_sha=start_sha, proc_start=process_start_time(pid) or "",
-                    completion_file=str(completion), stop_file=str(stop),
+                    branch=branch_name(issue), worktree=str(workdir), pid=supervisor.pid,
+                    attempt_id=attempt_id, manifest=str(attempt.path),
+                    stdout=str(attempt.stdout_path), stderr=str(attempt.stderr_path),
+                    started=started, start_sha=start_sha,
+                    proc_start=process_start_time(supervisor.pid) or "",
                 )
                 launched.append(key)
             except Exception as exc:  # noqa: BLE001 — isolate one bad issue from the rest
                 print(f"dispatch: skipping {key} — launch failed: {exc}", file=sys.stderr)
+                if attempt is not None:
+                    store.update(
+                        attempt, state="completed", terminal_outcome="turn_failed",
+                        failure_category="harness_failure",
+                        failure_evidence=f"supervisor launch failed: {exc}",
+                    )
+                    reg[key] = WorkerHandle(
+                        project=project.name, number=issue.number, role=role,
+                        branch=branch_name(issue), worktree=str(workdir), pid=0,
+                        attempt_id=attempt.attempt_id, manifest=str(attempt.path),
+                        stdout=str(attempt.stdout_path), stderr=str(attempt.stderr_path),
+                        started=started, start_sha=start_sha, proc_start="",
+                    )
                 continue
     finally:
         save_registry(root / ".orchestra" / "workers.json", reg)

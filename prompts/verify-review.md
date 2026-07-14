@@ -21,19 +21,14 @@ Review:
 Re-run verification checks? {rerun_checks}. If yes, run these and require them to pass:
 {workflow}
 
-You run ONCE, non-interactively — everything completes within this run. Run any checks
-synchronously to completion; never background a command and wait for a notification, and
-never await an external event. There is no next turn to resume you.
+Run checks synchronously to completion. If a foreground command yields a session ID, keep
+polling that same session until it exits. Orchestra supervises provider interruptions and
+configured time limits; do not infer failure from silence.
 
-## Emit the result file — this is your only output that counts
-Your prose is IGNORED. The engine reads ONLY the JSON result file — no file means your
-verdict is lost and the issue gets stuck ("verifier produced no result"), even if you
-reviewed everything. So the **mandatory final action** of this run is to write a JSON result
-file to {result_file} with exactly these keys:
-- `result`: "accept" if the work satisfies the issue and is sound, else "reject"
-- `decisions`: if rejecting, a concrete, actionable list of what must change (fed back to
-  the worker); empty string if accepting
-- `blocked_reason`: ""
-
-Write that file before you finish, no matter what. Do not modify code or the queue:
+## Structured final response
+Return the final JSON object required by the harness-provided schema. Use `accept` when the
+work is sound, `reject` with concrete actionable findings when it needs rework, or `blocked`
+only when verification itself cannot be completed. A blocked result must include a stable
+`failure_category`, evidence, and an accurate `requires_human`. Orchestra captures and
+validates the response. Do not modify code, the queue, or Orchestra control-plane files:
 verdict only.

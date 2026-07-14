@@ -21,12 +21,8 @@ inline task — judge it from the title + acceptance alone. Judge ONLY:
 Be permissive: when you are uncertain, return "validated". A worker will surface a genuine
 gap as `blocked`, which is cheaper than wrongly blocking workable issues.
 
-Your prose is ignored by orchestra. The engine reads only the JSON result file; no file
-means validation is lost. Before you finish, write a JSON result file to {result_file}
-with exactly these keys:
-- `result`: "validated" (default when unsure) or "blocked" (only when clearly unworkable)
-- `blocked_reason`: if blocked, a one-line reason (empty string otherwise)
-- `decisions`: ""
-
-Writing {result_file} is the mandatory final action of the run. Do not modify the queue
-or any repo.
+Return the final JSON object required by the harness-provided schema. Use outcome `validated`
+(the default when unsure) or `blocked` only when clearly unworkable. A blocked result must
+include a stable `failure_category`, concrete `evidence`, and an accurate `requires_human`.
+Orchestra captures and validates the response. Do not modify the queue, any repo, or any
+Orchestra control-plane file.

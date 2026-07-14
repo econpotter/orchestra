@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -26,7 +24,7 @@ from orchestra.issue import (
 from orchestra.projects import find_project, read_projects
 from orchestra.queue import find_issue, read_queue, write_queue
 from orchestra.reconcile import reconcile as _reconcile
-from orchestra.registry import issue_key, load_registry, save_registry
+from orchestra.registry import issue_key, load_registry
 from orchestra.scaffold import new_project
 from orchestra.workspace import WorkspaceError, resolve_workspace, save_workspace_setting
 
@@ -434,19 +432,9 @@ def cmd_kill(args: argparse.Namespace) -> int:
     key = issue_key(args.project, args.number)
     handle = reg.get(key)
     if handle is not None:
-        try:
-            os.kill(handle.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        del reg[key]
-        save_registry(reg_path, reg)
-    qf = layout.queue_file(root, args.project)
-    issues = read_queue(qf) if qf.exists() else []
-    issue = find_issue(issues, args.number)
-    if issue is not None:
-        block_issue(issue, "killed by operator")
-        write_queue(qf, issues)
-    print(f"killed {args.project}#{args.number:03d}")
+        from orchestra.attempt import AttemptStore
+        AttemptStore(root).load(handle.attempt_id).stop_path.touch()
+    print(f"cancellation requested for {args.project}#{args.number:03d}")
     return 0
 
 
@@ -475,13 +463,23 @@ def cmd_logs(args: argparse.Namespace) -> int:
     project = _resolve_project(args)
     if project is None:
         return 2
-    log = root / ".orchestra" / "logs" / f"{issue_key(args.project, args.number)}.log"
-    if not log.exists():
-        print(f"no log at {log}", file=sys.stderr)
+    from orchestra.attempt import AttemptStore
+    attempts = AttemptStore(root)
+    candidates = [attempts.latest(args.project, args.number, role)
+                  for role in ("worker", "validator", "verifier")]
+    attempt = max((item for item in candidates if item),
+                  key=lambda item: item.data.get("started_at", ""), default=None)
+    if attempt is None:
+        print("no attempt log found", file=sys.stderr)
         return 2
     if args.follow:
-        return subprocess.run(["tail", "-f", str(log)]).returncode
-    sys.stdout.write(log.read_text())
+        return subprocess.run(["tail", "-f", str(attempt.stdout_path),
+                               str(attempt.stderr_path)]).returncode
+    if attempt.stdout_path.exists():
+        sys.stdout.write(attempt.stdout_path.read_text())
+    if attempt.stderr_path.exists() and attempt.stderr_path.stat().st_size:
+        sys.stdout.write(f"\n--- stderr ({attempt.attempt_id}) ---\n")
+        sys.stdout.write(attempt.stderr_path.read_text())
     return 0
 
 

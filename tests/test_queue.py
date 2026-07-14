@@ -71,10 +71,6 @@ def test_layout_paths(tmp_path: Path):
         layout.worktree_dir(root, "wf", 42)
         == root / ".orchestra" / "worktrees" / "wf-042"
     )
-    assert (
-        layout.result_file(root, "wf", 42)
-        == root / ".orchestra" / "results" / "wf#042.json"
-    )
 
 
 def test_next_number():

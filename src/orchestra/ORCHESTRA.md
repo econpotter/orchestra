@@ -46,16 +46,16 @@ issue is reopened at `open` for normal validation on the next host-level tick. I
 dispatch a worker itself.
 
 ## Execution environment
-The host scheduler owns execution. From Herdr or another Bubblewrap-confined session, use
+The host scheduler owns execution. From Herdr or another confined agent session, use
 read-only commands (`guide`, `status`, `issue list`, `issue show`, `logs`, and `diff`) and
 queue-only controls (`issue add`, `reject`, and `release`). These commands do not launch a
 worker.
 
 **Do not run `orchestra tick`, `orchestra dispatch`, or `orchestra reconcile` from
 Herdr.** Run execution commands from an external host shell, or leave them to the host
-scheduler. Herdr already runs inside Bubblewrap, and an issue with a `ro-link` starts its
-worker in another Bubblewrap sandbox. That nested Bubblewrap launch fails, and workers
-started from Herdr would also inherit Herdr's restrictions. Run engine Git/worktree
+scheduler. Supervised workers use a transient user systemd service as their verified outer
+filesystem boundary; a confined session may not have the host user-manager authority or
+filesystem view needed to create it. Run engine Git/worktree
 commands (`approve` and `retry-merge`) from the external host shell as well.
 
 Run `orchestra <command> --help` for details.
@@ -65,9 +65,8 @@ Each issue inherits its project's `Worktree-Seed` entries from the workspace's
 `PROJECTS.md`; issues do not duplicate them. Entries are comma-separated: `path` copies a
 seed, `path:link` creates a writable symlink, and `path:ro-link` shares the project source
 read-only inside workers and verifiers. An untracked destination is a symlink; an existing
-tracked path is used as the bind mount point. `ro-link` requires Bubblewrap (`bwrap`), and
-a missing source fails dispatch. `orchestra issue show <project> <n>` prints the effective
-seed list.
+tracked path is protected read-only by the outer systemd boundary. A missing source fails
+dispatch. `orchestra issue show <project> <n>` prints the effective seed list.
 
 ## Wiring a project (one-time)
 Add ONE line to the project's `AGENTS.md`:
