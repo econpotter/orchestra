@@ -45,6 +45,19 @@ gate plus the agent prompt, not a run-time egress block.
 issue is reopened at `open` for normal validation on the next host-level tick. It does not
 dispatch a worker itself.
 
+## Execution environment
+The host scheduler owns execution. From Herdr or another Bubblewrap-confined session, use
+read-only commands (`guide`, `status`, `issue list`, `issue show`, `logs`, and `diff`) and
+queue-only controls (`issue add`, `reject`, and `release`). These commands do not launch a
+worker.
+
+**Do not run `orchestra tick`, `orchestra dispatch`, or `orchestra reconcile` from
+Herdr.** Run execution commands from an external host shell, or leave them to the host
+scheduler. Herdr already runs inside Bubblewrap, and an issue with a `ro-link` starts its
+worker in another Bubblewrap sandbox. That nested Bubblewrap launch fails, and workers
+started from Herdr would also inherit Herdr's restrictions. Run engine Git/worktree
+commands (`approve` and `retry-merge`) from the external host shell as well.
+
 Run `orchestra <command> --help` for details.
 
 ## Worktree data

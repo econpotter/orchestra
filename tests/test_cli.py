@@ -8,6 +8,9 @@ def test_guide_prints_integration_doc(capsys):
     assert "orchestra issue add" in out
     assert "awaiting_review -> needs_rework" in out
     assert "blocked -> open" in out
+    assert "Do not run `orchestra tick`" in out
+    assert "host scheduler" in out
+    assert "nested Bubblewrap" in out
 
 
 def test_root_defaults_to_none(monkeypatch):
