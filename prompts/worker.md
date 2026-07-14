@@ -36,6 +36,11 @@ finish within this run:
   long command and then wait for a completion notification, and do NOT schedule a wakeup or
   await any external event — the process exits at end of turn and that work is lost, leaving
   the issue stuck with no commit and no result.
+- A long shell call may yield control with a session ID after its foreground wait expires.
+  This does not mean the process was terminated. Poll that same session with the harness's
+  continuation/write-stdin tool until it reports an exit status. Do not start dependent work,
+  infer a timeout from missing output, or report blocked while a required session is still
+  running.
 - Subagents (Agent/Task tool) are fine — they complete within this run; that is the intended
   way to parallelize the plan.
 - If a required task genuinely cannot finish in one run, do NOT park waiting for it: stop and

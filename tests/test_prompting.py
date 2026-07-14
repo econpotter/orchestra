@@ -30,3 +30,10 @@ def test_render_prompt_missing_custom_path_fails_loud(tmp_path: Path):
 
     with pytest.raises(FileNotFoundError, match="prompt not found"):
         render_prompt(tmp_path, "custom/private.md", {})
+
+
+def test_worker_prompt_requires_polling_yielded_commands():
+    prompt = (Path(__file__).parents[1] / "prompts" / "worker.md").read_text()
+    assert "session ID" in prompt
+    assert "poll" in prompt.lower()
+    assert "does not mean the process was terminated" in prompt
