@@ -1,0 +1,369 @@
+# Reliable harness execution
+
+## Purpose
+
+Orchestra must run unattended coding workers reliably through interchangeable agent
+harnesses. Codex and Claude are the supported harnesses for the first implementation. Pi is
+represented in the contract so the core does not accidentally require Codex- or
+Claude-specific behavior, but a real Pi adapter is a later feature.
+
+A run must either complete with mutually consistent evidence or stop with an explicit,
+actionable failure. Queue decisions must never depend on scraping human prose when structured
+evidence exists, and models must not write Orchestra control-plane files themselves.
+
+## Architecture decision
+
+Status quo: provider configuration supplies an argument vector and prompt transport;
+Orchestra treats the process as opaque, combines stdout and stderr, and expects the agent to
+write a result file.
+
+From-scratch design: harness-specific adapters feed one attempt supervisor, append-only
+attempt store, normalized outcome contract, and provider-independent reconciler.
+
+Use the from-scratch design. This repository is in development, so preserving the opaque
+provider interface is not a reason to retain it. Rename the current `providers` concept to
+`harnesses`: Codex, Claude, and Pi are agent harnesses, while each harness may itself use a
+model provider.
+
+## Invariants
+
+1. Reconciliation is the sole queue writer.
+2. Harness adapters never choose queue transitions or retry policy.
+3. Raw stdout events, raw stderr diagnostics, the process result, the branch delta, and the
+   normalized terminal outcome are distinct evidence sources.
+4. Stdout and stderr are never combined for a structured harness.
+5. Every dispatch creates its durable attempt manifest before process launch.
+6. Attempt artifacts are append-only except for atomic manifest state replacement.
+7. A model cannot declare infrastructure failure retryable. Orchestra derives retry policy
+   from structured evidence and configuration.
+8. A new commit is implementation evidence, not sufficient evidence of successful completion.
+9. A quiet active command is not a stall, and a yielded command is not a termination.
+10. Unknown optional event fields and event types are retained and ignored. Missing required
+    lifecycle evidence fails loudly.
+
+## Components
+
+```text
+CodexExecAdapter ---+
+                    |
+ClaudePrintAdapter -+-> AttemptSupervisor -> AttemptStore -> Reconciler -> Queue
+                    |          |
+PiJsonAdapter sketch+          +-> raw stdout, raw stderr, normalized snapshot,
+                                   process completion, canonical role result
+```
+
+### HarnessAdapter
+
+Each adapter owns only harness-specific behavior:
+
+- declare capabilities;
+- preflight the executable, version, configuration, and protocol;
+- construct launch, resume, and cancel operations;
+- decode stdout events without reading stderr as protocol data;
+- project raw events into normalized lifecycle evidence;
+- extract and validate the harness's structured final response.
+
+The interface must support a fake adapter so core behavior can be tested without a paid model.
+
+### AttemptSupervisor
+
+The supervisor owns operating-system process behavior:
+
+- start one process group per attempt;
+- capture stdout and stderr into separate files without pipe backpressure;
+- incrementally append raw events and update a normalized observation snapshot;
+- record PID plus process start time, exit code or signal, and completion time;
+- terminate the complete process group on explicit cancellation;
+- atomically finalize the attempt manifest even after malformed output or wrapper failure.
+
+The current `worker_process` wrapper evolves into this supervisor. It must never infer queue
+state.
+
+### AttemptStore
+
+Each attempt receives an immutable ID and directory. The durable manifest records at least:
+
+- schema version and attempt ID;
+- project, issue, role, harness, model, and harness version;
+- adapter version and declared capabilities;
+- parent attempt and session ID when resumed;
+- prompt, instruction-bundle, configuration, and result-schema fingerprints;
+- worktree, branch, start commit, and observed terminal commit;
+- process ID, process start time, exit status or signal, and timestamps;
+- raw stdout event path, raw stderr path, provider-output path, and canonical-result path;
+- latest normalized event, active tool, and terminal normalized outcome.
+
+The worker registry points to active attempt IDs. It is not the durable attempt history.
+
+### Reconciler
+
+Reconciliation consumes only finalized attempt manifests plus Git evidence. It validates the
+role result, applies the commit/result truth table, derives recovery policy, writes the queue,
+and retains all contradictory evidence.
+
+## Capability contract
+
+Capabilities are data, not executable-name checks. Initial fields are:
+
+- `structured_events`;
+- `native_result_schema`;
+- `durable_session`;
+- `resume_session`;
+- `active_tool_events`;
+- `token_usage`;
+- `explicit_config_isolation`;
+- `graceful_cancel`.
+
+A role may declare required capabilities. Configuration validation rejects an incompatible
+harness before dispatch.
+
+Initial profiles:
+
+| Harness | Events | Native schema | Resume | Initial implementation |
+|---|---:|---:|---:|---:|
+| Codex exec | yes | yes | yes | yes |
+| Claude print | yes | yes | yes | yes |
+| Pi JSON/RPC | yes | no documented CLI schema | yes | no; design sketch only |
+
+The future `PiJsonAdapter` will consume `pi --mode json` lifecycle and tool events, use a
+durable session ID/file for resume, and validate final assistant JSON in Orchestra unless a
+narrow result extension is adopted. No Pi executable code, dependency, live fixture, or
+rollout gate belongs in the current feature.
+
+## Normalized lifecycle
+
+Raw harness events project into a deliberately small vocabulary:
+
+- `session_started`;
+- `turn_started`;
+- `tool_started`;
+- `tool_progress`;
+- `tool_completed`;
+- `provider_retrying`;
+- `agent_message`;
+- `turn_completed`;
+- `turn_failed`;
+- `protocol_error`.
+
+Every normalized event includes the raw-event offset, observed timestamp, harness-native type,
+and structured details relevant to classification. Raw events remain authoritative evidence;
+the normalized stream is the stable contract used by monitoring and reconciliation.
+
+A process exit without a terminal turn is `protocol_failure`. A malformed final JSONL record
+after abrupt process death is retained as a truncated tail and classified explicitly; it does
+not make earlier valid events disappear.
+
+## Orchestra-owned role results
+
+Worker, validator, and verifier schemas are versioned separately. Shared fields are:
+
+- `schema_version`;
+- `outcome`;
+- `decisions`;
+- `failure_category` when unsuccessful;
+- `evidence` when unsuccessful;
+- `requires_human`.
+
+Role-specific outcome enums remain narrow:
+
+- worker: `committed`, `blocked`;
+- validator: `validated`, `blocked`;
+- verifier: `accept`, `reject`, `blocked`.
+
+Codex and Claude receive the role schema through their native structured-output interfaces.
+Their adapters validate the returned object again. The future Pi adapter may validate a final
+assistant JSON object or expose an Orchestra result tool; this difference does not change the
+canonical role schema.
+
+The adapter writes provider output to an attempt-local path. Orchestra validates it and
+atomically writes the canonical result. Prompts no longer instruct agents to create result
+files with shell commands.
+
+## Failure taxonomy and recovery policy
+
+Failure category describes what happened. Retry disposition is a separate Orchestra-derived
+decision.
+
+Stable categories are:
+
+- `authentication_failure`;
+- `quota_failure`;
+- `upstream_failure`;
+- `harness_failure`;
+- `protocol_failure`;
+- `tool_observation_failure`;
+- `environment_failure`;
+- `acceptance_failure`;
+- `needs_human`;
+- `cancelled`;
+- `time_limit`.
+
+A command returning nonzero is ordinary agent evidence, not automatically a
+`tool_observation_failure`. That category means Orchestra cannot reliably establish tool
+state—for example, a tool started but neither completed nor remained observable.
+
+Retry disposition is one of `never`, `resume`, `fresh_attempt`, or `human`. Configuration maps
+structured categories and evidence to bounded policy. `needs_human`, `acceptance_failure`, and
+intentional cancellation never retry automatically.
+
+## Commit and result truth tables
+
+### Worker
+
+| New commit | Valid result | Meaning |
+|---:|---|---|
+| yes | `committed` | advance to `committed` |
+| yes | `blocked` | retain partial commit; block with contradiction evidence |
+| yes | absent/invalid | indeterminate; bounded finalization resume if safe, otherwise block |
+| no | `committed` | contract failure; never claim success |
+| no | `blocked` | apply failure and recovery policy |
+| no | absent/invalid | classify from terminal attempt evidence; never scrape prose |
+
+### Validator and verifier
+
+These roles must not create a commit. A branch change is a contract violation. A valid role
+result drives the existing queue transition; missing, malformed, or contradictory results use
+the same structured failure and recovery policy as workers.
+
+## Bounded resume
+
+Resume is allowed only when:
+
+- the original process is terminal;
+- the attempt has a durable session identifier;
+- the adapter declares resume support;
+- structured evidence maps to `resume`;
+- the configured attempt limit is not exhausted.
+
+A running command is never "recovered" by launching a second process. The supervisor continues
+observing the original attempt. A resume reuses the same worktree, records a parent attempt,
+preserves partial changes, and tells the harness to inspect current state before acting.
+
+Network-gated issues retain `held` and explicit release behavior. Recovery cannot bypass the
+gate.
+
+## Health monitoring
+
+Monitoring combines process state with normalized events. It records the active tool and its
+elapsed time rather than relying on log modification time.
+
+Limits are separate configuration values:
+
+- total attempt wall time;
+- idle time while no tool is active;
+- active-tool time;
+- graceful cancellation period.
+
+Each may be disabled during development calibration, but unattended production configuration
+must declare a wall limit explicitly. When a threshold fires, the supervisor records its name,
+configured value, last event, active tool, and elapsed time before cancellation.
+
+## Deterministic configuration and instructions
+
+Ambient global configuration and reproducible execution are competing goals. The default
+unattended policy is therefore `project_only`:
+
+1. Orchestra resolves applicable repository-owned `AGENTS.md` and `CLAUDE.md` guidance.
+2. It creates one ordered instruction bundle and records its fingerprint.
+3. Harness-native ambient discovery is disabled where supported.
+4. The bundle is supplied explicitly through the adapter.
+
+Optional `native` and `explicit_files` policies may be configured, but the chosen policy and
+fingerprints are attempt evidence. Ambient global instructions are never silently part of a
+reproducible attempt.
+
+Harness configuration explicitly controls model, reasoning effort, cwd, tool set, MCP servers,
+sandbox/permission mode, color, event format, environment allowlist, and instruction policy.
+Authentication remains in the harness's supported credential store and is never copied into
+attempt artifacts.
+
+Outer and inner sandbox ownership is explicit. A harness may bypass its own sandbox only when
+Orchestra verifies that an external sandbox is active. Nested Bubblewrap failure is an
+execution-boundary preflight error, not a model or command-yield failure.
+
+## Compatibility and protocol drift
+
+Preflight records the executable path and version, then exercises required capabilities or
+validates them against a supported protocol range. Version comparison alone is insufficient.
+
+Adapters must:
+
+- ignore and retain unknown optional events;
+- reject missing required lifecycle fields;
+- fail when native schema support is requested but unavailable;
+- distinguish a nonzero process exit from a structured terminal error;
+- reject optimistic terminal labels contradicted by structured error fields.
+
+The captured Claude fixture demonstrates the last rule: the CLI exited zero and emitted
+`subtype: success`, but `is_error: true`, HTTP 401, and prior authentication failures make the
+normalized outcome an authentication failure.
+
+## Verification
+
+Development is TDD. Required layers are:
+
+1. sanitized real-event fixtures for every implemented adapter;
+2. parser and normalization tests, including unknown fields and malformed/truncated JSONL;
+3. supervisor tests for separate streams, atomic completion, process groups, and cancellation;
+4. truth-table tests covering every role and evidence combination;
+5. recovery-limit tests with preserved worktree changes;
+6. opt-in real Codex and Claude canaries through dispatch and reconciliation.
+
+Mocked parser tests are necessary but insufficient. Completion requires observing the real
+installed harness path. A successful Claude canary is still outstanding because the fixture
+capture environment returned a structured HTTP 401 despite reporting a logged-in subscription.
+
+## Delivery plan
+
+### Increment 0: contract and evidence
+
+- Land this contract and harness-specific adapter notes.
+- Capture and sanitize real Codex success and Claude failure fixtures.
+- Require a successful Claude fixture before Claude rollout, not before parser development.
+- Keep Pi implementation explicitly deferred.
+
+### Increment 1: supervisor and attempt ledger
+
+- Introduce adapter interfaces and capability validation.
+- Separate stdout and stderr.
+- Persist attempt manifests and raw artifacts.
+- Run beside the current reconciliation path in shadow mode.
+
+### Increment 2: Codex and Claude adapters
+
+- Implement structured event parsing and preflight for both harnesses.
+- Add native role schemas and Orchestra-owned canonical results.
+- Switch reconciliation to the explicit truth tables.
+
+### Increment 3: monitoring and recovery
+
+- Add event-aware limits and process-group cancellation.
+- Add bounded same-session resume.
+- Exercise failure and recovery through real canaries.
+
+### Increment 4: rollout
+
+- Run one bounded issue through Codex and one through Claude.
+- Rerun the `ai-due-diligence#042` workload through Codex.
+- Remove prose-log failure classification only after structured adapters cover active roles.
+
+### Later feature: Pi
+
+- Validate the documented capability sketch against an installed Pi version.
+- Capture real JSON/RPC fixtures.
+- Decide between final-message validation and a result extension.
+- Implement and canary `PiJsonAdapter` without changing queue semantics.
+
+## Acceptance criteria
+
+The feature is complete when:
+
+- every Codex and Claude attempt is explainable from retained structured evidence;
+- stdout protocol data cannot be corrupted by stderr diagnostics;
+- canonical results are schema-validated and written by Orchestra;
+- every commit/result combination has deterministic behavior;
+- quiet commands are not false stalls and genuine hangs are bounded;
+- recoverable terminal failures resume within strict limits;
+- human and acceptance failures never retry automatically;
+- incompatible harness capabilities fail before dispatch;
+- real Codex and Claude dispatch-to-reconcile canaries pass.

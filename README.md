@@ -76,3 +76,5 @@ takes effect on the next tick.
   required). Issues inherit the project declaration automatically.
 
 See `ORCHESTRA.md` (operating manual) and `docs/superpowers/specs/` (design) for depth.
+Harness supervision and structured attempt evidence are specified in
+[`protocol/HARNESS-RELIABILITY.md`](protocol/HARNESS-RELIABILITY.md).

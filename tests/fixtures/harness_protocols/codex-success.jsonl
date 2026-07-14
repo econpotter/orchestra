@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"thread-fixture"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item-fixture","type":"agent_message","text":"{\"outcome\":\"ok\",\"note\":\"protocol-canary\"}"}}
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":20,"reasoning_output_tokens":5}}
