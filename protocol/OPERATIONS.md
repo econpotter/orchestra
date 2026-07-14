@@ -56,12 +56,15 @@ judgment (vague acceptance / insufficient context / unbounded scope) before prom
 A **tick** is one `dispatch` then `reconcile`:
 - `tools/tick --root ROOT` — runs both as subprocesses (workers orphan and are reaped by
   init, the cron model). Stateless; safe to run on any cadence.
-- **systemd (preferred):** install the CLI first — `uv tool install ~/orchestra` (its venv
-  has the deps; the bare `tools/tick` runs under the system python, which doesn't). Then
+- **systemd (preferred):** install the CLI from the engine checkout first —
+  `uv tool install --force --editable /path/to/orchestra` (its venv has the dependencies;
+  the bare `tools/tick` runs under the system Python, which may not). Keep operational state
+  in a separate workspace and select it with `orchestra workspace set /path/to/workspace`.
+  Then use
   `systemd/orchestra.service` (oneshot → `%h/.local/bin/orchestra tick`; workspace comes
   from `orchestra workspace set PATH`)
   + `systemd/orchestra.timer` (`OnCalendar=*:0/15`, `Persistent=true`). Per-user:
-  `cp systemd/* ~/.config/systemd/user/` (no edits if the root is `~/orchestra`),
+  from the engine checkout, run `cp systemd/* ~/.config/systemd/user/`,
   `loginctl enable-linger "$USER"`, `systemctl --user daemon-reload`,
   `systemctl --user enable --now orchestra.timer`. Logs via journald
   (`journalctl --user -u orchestra.service`).
@@ -72,7 +75,15 @@ A **tick** is one `dispatch` then `reconcile`:
     the tools agents run (uv, git, node) — e.g. `~/.local/bin` plus nvm/cargo bins (find
     them with `command -v claude uv git node`). Without it every tick crashes
     `FileNotFoundError: 'claude'`.
-- **crontab fallback:** `*/15 * * * * cd ~/orchestra && mkdir -p .orchestra/logs && orchestra tick --root . >> .orchestra/logs/cron.log 2>&1` (uses the installed CLI). `tools/tick` works too when run under the project venv (`uv run tools/tick …`).
+- **crontab fallback:** create `.orchestra/logs` in the workspace, then install a job using
+  the installed CLI:
+
+  ```cron
+  */15 * * * * orchestra tick --root /path/to/workspace >> /path/to/workspace/.orchestra/logs/cron.log 2>&1
+  ```
+
+  `tools/tick` also works from the engine checkout when run under its project environment
+  (`uv run tools/tick --root /path/to/workspace`).
 
 ### Tick latency
 A single tick advances an issue by about one lifecycle stage: `dispatch` launches
@@ -83,13 +94,17 @@ hour of wall-clock once it starts, plus the worker's own run time. Tighten the i
 for faster pickup at the cost of more git/file churn; the agents themselves run detached
 across many ticks regardless.
 
-## Providers (Phase C)
-Provider launch mechanics live in `config.yaml` under `providers:` — core code never
-names a provider flag. Shipped: `claude` (prompt stdin), `codex` (prompt stdin), `pi`
-(prompt arg). To run a role on another provider, set BOTH `roles.<role>.provider` and
-`roles.<role>.model` (model strings differ per provider — e.g. claude `claude-opus-4-8`,
-codex `gpt-5-codex`, pi `anthropic/claude-opus-4-8`). To add a provider: add a block with
-an `argv` template (placeholders `{model} {workdir}` etc.) and `prompt: stdin|arg`.
+## Harnesses and providers (Phase C)
+Launch mechanics currently live in the workspace's `config.yaml` under `providers:`; core
+code does not hard-code executable flags. Claude and Codex are the supported harness targets.
+For each role, set both `roles.<role>.provider` and `roles.<role>.model`, then define the
+selected executable's `argv` template and `prompt: stdin|arg` transport. Model names differ
+between harnesses.
+
+The reliability design evolves this opaque provider process into supervised, harness-specific
+Claude and Codex adapters while keeping lifecycle policy provider-independent. `PiJsonAdapter`
+is a design sketch only: Pi has no implemented or verified harness integration yet. See
+`HARNESS-RELIABILITY.md` for the capability contract and rollout status.
 
 ## Control surface (Phase E)
 The `orchestra` CLI is the human/agent entrypoint (the `tools/*` scripts remain for
