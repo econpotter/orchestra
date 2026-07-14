@@ -37,9 +37,13 @@ gate plus the agent prompt, not a run-time egress block.
     orchestra issue list --status awaiting_review
     orchestra issue show <project> <n>     # full issue + decisions + diff pointer
     orchestra approve <project> <n>        # merge + archive an awaiting_review issue
-    orchestra reject  <project> <n> --note "why"   # bounce back for rework
+    orchestra reject  <project> <n> --note "why"   # awaiting_review -> needs_rework; blocked -> open
     orchestra release <project> <n>        # release a held Network issue (held->validated)
     orchestra logs <project> <n> -f        # watch a worker
+
+`reject` is state-sensitive: it sends reviewed work back for revision, while a blocked
+issue is reopened at `open` for normal validation on the next host-level tick. It does not
+dispatch a worker itself.
 
 Run `orchestra <command> --help` for details.
 
