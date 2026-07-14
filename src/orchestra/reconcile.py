@@ -64,6 +64,13 @@ def _retry_transient_worker_crash(issue, config: Config, *, key: str, pattern: s
     return True
 
 
+def _validated_status(issue, config: Config) -> str:
+    """Return the post-validation status under the configured network policy."""
+    if issue.network and config.hold_network_issues:
+        return "held"
+    return "validated"
+
+
 def _merge_failure_reason(exc: BaseException) -> str:
     """A never-empty, human-readable reason for an autoapprove merge failure (issue #006:
     merges were dying with a blank reason). Detail extraction is shared with retry-merge via
@@ -163,7 +170,7 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
             # block (result present) is a real verdict and is never crash-retried.
             if handle.role == "validator":
                 if res and res.result == "validated":
-                    issue.status = "held" if issue.network else "validated"
+                    issue.status = _validated_status(issue, config)
                     issue.crash_retries = 0
                 elif res:  # self-reported invalid — not a crash
                     block_issue(issue, res.blocked_reason)
@@ -187,13 +194,8 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
                 elif (pattern := _matching_transient_error(
                     handle.log, config.crash_transient_error_patterns
                 )) and _retry_transient_worker_crash(issue, config, key=key, pattern=pattern):
-                    # Re-dispatch as validated, reusing the seeded worktree. A Network
-                    # issue must never auto-re-dispatch, so it parks in `held` for an
-                    # explicit `orchestra release` instead.
-                    if issue.network:
-                        issue.status = "held"
-                    else:
-                        issue.status = "validated"
+                    # Re-dispatch under the configured network policy, reusing the worktree.
+                    issue.status = _validated_status(issue, config)
                 else:
                     if pattern:
                         print(
@@ -250,6 +252,12 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
         dep_graph = {i.number: i.depends_on for i in issues}
         changed = False
         for issue in issues:
+            if issue.status == "held" and issue.network and not config.hold_network_issues:
+                issue.status = "validated"
+                issue.blocked_reason = ""
+                transitions.append((issue_key(project.name, issue.number), "validated"))
+                changed = True
+                continue
             if issue.status != "open":
                 continue
             validation = validate_structural(
@@ -265,10 +273,8 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
                 transitions.append((issue_key(project.name, issue.number), "blocked"))
                 changed = True
             elif not config.validate_semantic:
-                # Deterministic validation: no LLM validator agent — promote here. A
-                # Network issue holds for an explicit `orchestra release` and never
-                # auto-dispatches (`held` is not in dispatch's candidate set).
-                issue.status = "held" if issue.network else "validated"
+                # Deterministic validation: no LLM validator agent — promote here.
+                issue.status = _validated_status(issue, config)
                 issue.blocked_reason = ""  # clear any stale invalid from a prior cycle
                 transitions.append((issue_key(project.name, issue.number), issue.status))
                 changed = True

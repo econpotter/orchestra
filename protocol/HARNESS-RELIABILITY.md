@@ -239,8 +239,8 @@ A running command is never "recovered" by launching a second process. The superv
 observing the original attempt. A resume reuses the same worktree, records a parent attempt,
 preserves partial changes, and tells the harness to inspect current state before acting.
 
-Network-gated issues retain `held` and explicit release behavior. Recovery cannot bypass the
-gate.
+When `hold_network_issues` is enabled, network-gated issues retain `held` and explicit
+release behavior. Recovery cannot bypass the configured gate.
 
 ## Health monitoring
 

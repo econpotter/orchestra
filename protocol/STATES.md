@@ -6,7 +6,7 @@ Statuses an issue moves through. `dispatch` records handles in workers.json and 
 |---|---|---|
 | open | newly promoted by a human; not yet validated | human |
 | validated | passed validate (structural + optional semantic); dispatchable to a worker | reconcile |
-| held | passed validate but `Network: true`; parked pending an explicit `orchestra release` — never auto-dispatched | reconcile |
+| held | passed validate under the opt-in network-hold policy; parked pending `orchestra release` | reconcile |
 | in_progress | a worker is running on it | reconcile (on dispatch) |
 | committed | worker finished with a commit on the branch; awaiting verify | reconcile |
 | needs_rework | verify rejected; re-dispatch to worker with feedback (Retries++) | reconcile |
@@ -24,7 +24,7 @@ Statuses an issue moves through. `dispatch` records handles in workers.json and 
 ## Lifecycle
 ```
 open --validate(pass)--> validated --dispatch--> in_progress
-open --validate(pass) + Network--> held --release--> validated
+open --validate(pass) + Network + hold_network_issues--> held --release--> validated
 open --validate(fail)--> blocked (invalid)
 in_progress --commit--> committed --verify(accept)--> awaiting_review --human approve (merge)--> archived
 in_progress --self-reported stuck--> blocked
@@ -43,29 +43,32 @@ instead of blocking, bounded by `crash_retries_cap` (config, default 2):
 | Crashed role | Re-queue to |
 |---|---|
 | validator | `open` (re-validate) |
-| worker (no commit) | `validated`, or `needs_rework` if `Retries>0` — or `held` when `Network: true` |
+| worker (no commit) | `validated`, or `needs_rework` if `Retries>0` — or `held` when both `Network: true` and `hold_network_issues: true` |
 | verifier | `committed` (re-verify) |
 
 `Crash-Retries` (issue field) counts these bounces and resets to 0 whenever the issue
 reaches a terminal via a real result (worker commit, verifier accept/reject), so the cap
 bounds a crash *loop*, not the issue's lifetime. Past the cap → `blocked` with the crash
-reason. A `Network: true` worker crash re-queues to `held`, never auto-re-dispatching.
+reason. A network worker crash re-queues normally unless the optional hold policy is on.
 
-## Network gate
-An issue with `Network: true` that passes validation goes to `held`, not `validated`.
-`held` is not in dispatch's candidate set, so a heavy/irreversible network job never runs
-unattended. `orchestra release <project> <number>` promotes `held → validated` (the
-explicit human go-ahead); it refuses any other status.
+## Network metadata and optional gate
+An issue with `Network: true` is dispatchable by default. The field records that a task
+uses external data or services so operators and prompts can treat it accordingly; ordinary
+network access does not require a manual state transition.
 
-The gate governs *dispatch* only. At run time the `Network` flag is **advisory** — there is
-no per-issue network jail. `sandbox.enabled` provides **filesystem** confinement, not
+Set `hold_network_issues: true` in `config.yaml` to require an explicit gate for every
+network issue. Under that policy, successful validation and transient worker retries go
+to `held`, which is not dispatchable. `orchestra release <project> <number>` promotes
+`held → validated`; it refuses any other status. Turning the policy off promotes existing
+network issues from `held` to `validated` during the next reconcile.
+
+At run time the `Network` flag is **advisory** — there is no per-issue network jail.
+`sandbox.enabled` provides **filesystem** confinement, not
 network isolation: `argv_prefix` runs each agent under `bwrap` with the rootfs ro-bound and
 only its workdir/tmp/results_dir writable, so a confined agent cannot write outside its
 worktree — but the network is shared, because the agent must reach its own model API to run
-at all. Blocking a heavy/irreversible mass-fetch therefore relies on the dispatch gate
-(`held`/`release`) plus the agent prompt, not on a run-time egress block. Real per-issue
-network isolation would require an `api.anthropic.com`-only egress allowlist (proxy or
-nftables); it is deliberately out of scope for a lean orchestrator.
+at all. Real per-issue network isolation would require an egress allowlist or proxy; it is
+deliberately out of scope for a lean orchestrator.
 
 (Historical note: issue #004 shipped a `bwrap --unshare-all` prefix that claimed to
 network-isolate `Network: false` agents. It was broken two ways — the prefix bound no

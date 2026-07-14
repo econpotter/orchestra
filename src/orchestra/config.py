@@ -30,9 +30,9 @@ class Sandbox:
     # Filesystem confinement for launched agents. When `enabled`, `argv_prefix` (a bwrap
     # invocation, see config.yaml) ro-binds the rootfs and grants a writable
     # workdir/tmp/results_dir, so a confined agent cannot write files outside its worktree.
-    # Network is shared — the agent needs its model API — so this does NOT enforce the
-    # `Network` flag at run time (that is a dispatch gate + advisory; real per-issue network
-    # isolation would need an egress allowlist, out of scope).
+    # Network is shared — the agent needs its model API — so this does not enforce the
+    # `Network` flag at run time. The flag is advisory by default and can be made a dispatch
+    # gate with Config.hold_network_issues; real egress isolation is out of scope.
     enabled: bool
     argv_prefix: list[str]
 
@@ -52,9 +52,17 @@ class Config:
     template_path: str
     merge_tmpdir: str = ""
     crash_retries_cap: int = 2
+    hold_network_issues: bool = False
     crash_transient_error_patterns: list[str] = field(
         default_factory=lambda: list(DEFAULT_CRASH_TRANSIENT_ERROR_PATTERNS)
     )
+
+
+def _optional_bool(data: dict[str, object], key: str, *, default: bool) -> bool:
+    value = data.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"config: {key} must be a boolean")
+    return value
 
 
 def load_config(path: str | Path) -> Config:
@@ -101,6 +109,7 @@ def load_config(path: str | Path) -> Config:
         template_path=template_path,
         merge_tmpdir=merge_tmpdir,
         crash_retries_cap=int(data.get("crash_retries_cap", 2)),
+        hold_network_issues=_optional_bool(data, "hold_network_issues", default=False),
         crash_transient_error_patterns=[str(pattern) for pattern in transient_patterns],
     )
 

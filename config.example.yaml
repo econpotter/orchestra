@@ -7,6 +7,9 @@ validate: {semantic: false}
 stall: {idle_minutes: 0}
 retries_cap: 2
 crash_retries_cap: 2
+# Network access is ordinary by default. Set this true only when every issue marked
+# `Network: true` must wait for an explicit `orchestra release` before dispatch.
+hold_network_issues: false
 providers:
   codex:
     argv: ["codex", "exec", "--model", "{model}", "-C", "{workdir}", "--skip-git-repo-check"]

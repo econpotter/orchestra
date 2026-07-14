@@ -21,9 +21,10 @@ def build_argv(
 ) -> list[str]:
     # When enabled, the sandbox is a FILESYSTEM confinement (see config.yaml): bwrap
     # ro-binds the rootfs and gives the agent a writable workdir/tmp/results_dir. Network is
-    # shared — the agent must reach its model API to run at all — so `Network: false` is a
-    # dispatch gate + advisory, not a run-time network jail (that would need an egress
-    # allowlist, out of scope). Project ro-link seeds add nested read-only binds below.
+    # shared — the agent must reach its model API to run at all — so `Network` is advisory
+    # metadata, not a run-time network jail. Config may opt into a pre-dispatch hold; real
+    # egress isolation would need an allowlist and remains out of scope. Project ro-link
+    # seeds add nested read-only binds below.
     argv = [render(tok, context) for tok in provider.argv]
     binds = read_only_binds or []
     bind_argv = [part for src, dst in binds for part in ("--ro-bind", str(src), str(dst))]

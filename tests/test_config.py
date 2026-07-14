@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from orchestra.config import load_config
 
 CONFIG = """\
@@ -25,6 +27,7 @@ def test_load_config(tmp_path: Path):
     assert cfg.validate_semantic is True
     assert cfg.stall_idle_minutes == 0
     assert cfg.autoapprove is False
+    assert cfg.hold_network_issues is False
 
 
 def test_config_defaults(tmp_path: Path):
@@ -34,6 +37,20 @@ def test_config_defaults(tmp_path: Path):
     assert cfg.validate_semantic is False  # opt-in: deterministic validation by default
     assert cfg.stall_idle_minutes == 0
     assert cfg.autoapprove is False
+    assert cfg.hold_network_issues is False
+
+
+def test_network_hold_is_configurable(tmp_path: Path):
+    p = tmp_path / "config.yaml"
+    p.write_text("slots: 1\nroles: {}\nhold_network_issues: true\n")
+    assert load_config(p).hold_network_issues is True
+
+
+def test_network_hold_rejects_non_boolean_values(tmp_path: Path):
+    p = tmp_path / "config.yaml"
+    p.write_text('slots: 1\nroles: {}\nhold_network_issues: "false"\n')
+    with pytest.raises(ValueError, match="hold_network_issues must be a boolean"):
+        load_config(p)
 
 
 PROVIDERS_CONFIG = """\

@@ -404,40 +404,86 @@ def test_validator_crash_requeues_to_open(tmp_path: Path):
     assert issue.crash_retries == 1
 
 
-def test_network_issue_holds_via_validator(tmp_path: Path, monkeypatch):
-    # semantic on: validator accepts a Network issue → held (not validated), never dispatched.
+def test_network_issue_validates_by_default_via_validator(tmp_path: Path, monkeypatch):
+    # Network metadata is advisory by default: semantic acceptance is dispatchable.
     monkeypatch.setenv("ORCHESTRA_FAKE_MODE", "validated")
     _setup(tmp_path, _issue(1, "open", network=True))
     cfg = load_config(tmp_path / "config.yaml")
     dispatch(tmp_path, cfg, started="t")
     _wait_all_dead(tmp_path)
     reconcile(tmp_path, cfg)
-    assert _status(tmp_path, 1) == "held"
-    assert dispatch(tmp_path, cfg, started="t2") == []  # held is not dispatchable
+    assert _status(tmp_path, 1) == "validated"
 
 
-def test_network_issue_holds_deterministic(tmp_path: Path):
-    # semantic off: reconcile promotes a valid Network open issue to held, no agent launched.
+def test_network_issue_validates_by_default_deterministic(tmp_path: Path):
+    # Deterministic validation also treats Network as advisory by default.
     _setup(tmp_path, _issue(1, "open", network=True))
     p = tmp_path / "config.yaml"
     p.write_text(p.read_text().replace("semantic: true", "semantic: false"))
     cfg = load_config(p)
     assert dispatch(tmp_path, cfg, started="t") == []
     reconcile(tmp_path, cfg)
-    assert _status(tmp_path, 1) == "held"
+    assert _status(tmp_path, 1) == "validated"
 
 
-def test_network_worker_crash_holds(tmp_path: Path, monkeypatch):
-    # a released Network issue (validated) whose worker crashes must re-queue to held,
-    # never auto-re-dispatching the network side effect.
+def test_network_worker_crash_requeues_by_default(tmp_path: Path, monkeypatch):
+    # A transient worker crash requeues normally when Network is advisory.
     monkeypatch.setenv("ORCHESTRA_FAKE_MODE", "session_limit")
     _setup(tmp_path, _issue(1, "validated", network=True))
     cfg = load_config(tmp_path / "config.yaml")
     dispatch(tmp_path, cfg, started="t")
     _wait_all_dead(tmp_path)
     reconcile(tmp_path, cfg)
+    assert _status(tmp_path, 1) == "validated"
+
+
+def test_network_hold_remains_available_as_opt_in(tmp_path: Path):
+    config = CONFIG.replace("semantic: true", "semantic: false")
+    _setup(
+        tmp_path,
+        _issue(1, "open", network=True),
+        config_text=config + "hold_network_issues: true\n",
+    )
+    cfg = load_config(tmp_path / "config.yaml")
+    reconcile(tmp_path, cfg)
     assert _status(tmp_path, 1) == "held"
     assert dispatch(tmp_path, cfg, started="t2") == []
+
+
+def test_network_hold_applies_to_semantic_validator_acceptance(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRA_FAKE_MODE", "validated")
+    _setup(
+        tmp_path,
+        _issue(1, "open", network=True),
+        config_text=CONFIG + "hold_network_issues: true\n",
+    )
+    cfg = load_config(tmp_path / "config.yaml")
+    dispatch(tmp_path, cfg, started="t")
+    _wait_all_dead(tmp_path)
+    reconcile(tmp_path, cfg)
+    assert _status(tmp_path, 1) == "held"
+
+
+def test_network_hold_applies_to_transient_worker_retry(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRA_FAKE_MODE", "session_limit")
+    _setup(
+        tmp_path,
+        _issue(1, "validated", network=True),
+        config_text=CONFIG + "hold_network_issues: true\n",
+    )
+    cfg = load_config(tmp_path / "config.yaml")
+    dispatch(tmp_path, cfg, started="t")
+    _wait_all_dead(tmp_path)
+    reconcile(tmp_path, cfg)
+    assert _status(tmp_path, 1) == "held"
+
+
+def test_disabling_network_hold_releases_existing_held_issue(tmp_path: Path):
+    _setup(tmp_path, _issue(1, "held", network=True))
+    cfg = load_config(tmp_path / "config.yaml")
+    transitions = reconcile(tmp_path, cfg)
+    assert _status(tmp_path, 1) == "validated"
+    assert transitions == [("wf#001", "validated")]
 
 
 def test_reused_pid_is_treated_as_exited(tmp_path: Path):

@@ -635,7 +635,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_retry.add_argument("number", type=int)
     p_retry.set_defaults(func=cmd_retry_merge)
 
-    p_release = sub.add_parser("release", help="release a held Network issue (held->validated)")
+    p_release = sub.add_parser(
+        "release", help="release an opt-in or legacy held issue (held->validated)"
+    )
     p_release.add_argument("project")
     p_release.add_argument("number", type=int)
     p_release.set_defaults(func=cmd_release)
