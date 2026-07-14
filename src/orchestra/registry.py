@@ -26,6 +26,7 @@ class WorkerHandle:
     started: str
     start_sha: str
     proc_start: str
+    supervisor_unit: str = ""
 
 
 def load_registry(path: str | Path) -> dict[str, WorkerHandle]:

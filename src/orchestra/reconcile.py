@@ -13,7 +13,7 @@ from orchestra.issue import block_issue, exception_detail
 from orchestra.projects import Project, find_project, read_projects
 from orchestra.queue import find_issue, read_queue, write_queue
 from orchestra.registry import issue_key, load_registry, save_registry
-from orchestra.harness import parse_role_result
+from orchestra.harness import HarnessOutcome, NormalizedEvent, adapter_for, parse_role_result
 from orchestra.outcome import AttemptEvidence, decide_attempt
 from orchestra.selection import worker_alive
 from orchestra.validate import validate_structural
@@ -89,6 +89,55 @@ def _blocked_evidence(attempt: Attempt, reason: str) -> str:
     return f"{category}: {evidence} (attempt {attempt.attempt_id})"
 
 
+def _recover_finalization(store: AttemptStore, attempt: Attempt) -> bool:
+    """Finalize from durable post-exit evidence if the supervisor died mid-finalization."""
+    if not attempt.process_path.is_file():
+        return False
+    try:
+        process = json.loads(attempt.process_path.read_text())
+        events = []
+        if attempt.events_path.is_file():
+            for line in attempt.events_path.read_text().splitlines():
+                event = json.loads(line)
+                events.append(NormalizedEvent(
+                    str(event["kind"]), str(event["native_type"]), dict(event["details"])
+                ))
+        result = _canonical_result(attempt)
+        limit = str(process.get("limit_triggered", ""))
+        if limit:
+            category = "cancelled" if limit == "cancelled" else "time_limit"
+            outcome = HarnessOutcome("turn_failed", category, f"limit triggered: {limit}")
+        elif any(event.kind == "protocol_error" for event in events):
+            outcome = HarnessOutcome("turn_failed", "protocol_failure", "malformed stdout JSONL")
+        else:
+            active_tools: set[str] = set()
+            for event in events:
+                tool_id = str(event.details.get("tool_id") or event.details.get("tool", ""))
+                if event.kind == "tool_started":
+                    active_tools.add(tool_id)
+                elif event.kind == "tool_completed":
+                    active_tools.discard(tool_id)
+            if active_tools:
+                outcome = HarnessOutcome(
+                    "turn_failed", "tool_observation_failure",
+                    "harness exited while a tool remained active",
+                )
+            else:
+                outcome = adapter_for(attempt.data["harness"]).classify(
+                    process_exit=int(process["process_exit"]), events=events, result=result,
+                )
+    except (KeyError, TypeError, ValueError, OSError):
+        return False
+    store.update(
+        attempt, state="completed", process_exit=process["process_exit"],
+        process_signal=process.get("process_signal"), completed_at=process["completed_at"],
+        terminal_outcome=outcome.terminal, failure_category=outcome.category,
+        failure_evidence=outcome.evidence, limit_triggered=limit,
+        recovered_finalization=True,
+    )
+    return True
+
+
 def reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
     # Serialize engine ops (see dispatch) — a concurrent reconcile/dispatch skips.
     root = Path(root)
@@ -127,7 +176,7 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
         store = AttemptStore(root)
         attempt = store.load(handle.attempt_id)
         issue.blocked_reason = ""
-        if attempt.data.get("state") != "completed":
+        if attempt.data.get("state") != "completed" and not _recover_finalization(store, attempt):
             store.update(
                 attempt, state="completed", terminal_outcome="turn_failed",
                 failure_category="harness_failure",

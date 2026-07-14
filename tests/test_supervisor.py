@@ -30,6 +30,7 @@ def _attempt(tmp_path: Path):
 
 def test_supervisor_separates_streams_and_writes_canonical_result(tmp_path: Path):
     store, attempt = _attempt(tmp_path)
+    store.update(attempt, harness_version="codex-cli 1.2.3")
     assert run_attempt(attempt.path) == 0
     loaded = store.load("a1")
     assert loaded.data["state"] == "completed"
@@ -40,6 +41,8 @@ def test_supervisor_separates_streams_and_writes_canonical_result(tmp_path: Path
     result = json.loads(loaded.canonical_result_path.read_text())
     assert result["outcome"] == "committed"
     assert loaded.data["session_id"] == "fake-thread"
+    assert loaded.data["harness_version"] == "codex-cli 1.2.3"
+    assert json.loads(loaded.process_path.read_text())["process_exit"] == 0
 
 
 def test_supervisor_retains_malformed_stdout_and_fails_protocol(tmp_path: Path, monkeypatch):

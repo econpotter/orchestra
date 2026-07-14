@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from typing import TypeVar
 
 from orchestra.issue import Issue
@@ -55,9 +56,16 @@ def process_start_time(pid: int) -> str | None:
 
 def worker_alive(handle) -> bool:
     """Return supervisor liveness while guarding against PID reuse."""
-    return pid_alive(handle.pid) and (
-        handle.proc_start == "" or process_start_time(handle.pid) == handle.proc_start
-    )
+    if pid_alive(handle.pid) and (
+            handle.proc_start == "" or process_start_time(handle.pid) == handle.proc_start):
+        return True
+    if handle.supervisor_unit:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", handle.supervisor_unit],
+            text=True, capture_output=True, check=False,
+        )
+        return result.stdout.strip() in {"active", "activating", "deactivating"}
+    return False
 
 
 def role_for_issue(

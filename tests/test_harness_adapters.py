@@ -22,6 +22,7 @@ def _events(name: str) -> list[dict]:
 
 def test_worker_result_schema_is_strict_and_versioned():
     schema = role_schema("worker")
+    assert "$schema" not in schema
     assert schema["additionalProperties"] is False
     assert schema["properties"]["outcome"]["enum"] == ["committed", "blocked"]
     assert set(schema["required"]) == {
@@ -85,6 +86,19 @@ def test_claude_optimistic_success_with_auth_error_is_failure():
     outcome = adapter.classify(process_exit=0, events=normalized, result=None)
     assert outcome.category == "authentication_failure"
     assert outcome.terminal == "turn_failed"
+
+
+def test_claude_adapter_passes_configured_effort_and_schema_value(tmp_path: Path):
+    schema = tmp_path / "schema.json"
+    schema.write_text('{"type":"object"}')
+    launch = HarnessLaunch(
+        executable="claude", model="haiku", reasoning_effort="high", cwd=tmp_path,
+        prompt_file=tmp_path / "prompt", schema_file=schema,
+        output_file=tmp_path / "provider", sandbox="danger-full-access",
+    )
+    argv = ClaudePrintAdapter().build_argv(launch)
+    assert argv[argv.index("--effort") + 1] == "high"
+    assert argv[argv.index("--json-schema") + 1] == schema.read_text()
 
 
 def test_codex_success_requires_terminal_lifecycle_and_valid_result():

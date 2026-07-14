@@ -37,6 +37,8 @@ class Attempt:
     @property
     def canonical_result_path(self) -> Path: return self.directory / "result.json"
     @property
+    def process_path(self) -> Path: return self.directory / "process.json"
+    @property
     def stop_path(self) -> Path: return self.directory / "stop"
 
 
@@ -69,6 +71,7 @@ class AttemptStore:
                 "result_schema": "result.schema.json", "stdout": "stdout.jsonl",
                 "stderr": "stderr.log", "events": "events.jsonl",
                 "provider_output": "provider-result.json", "canonical_result": "result.json",
+                "process": "process.json",
             },
         }
         attempt = Attempt(attempt_id, directory, data)

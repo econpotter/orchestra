@@ -6,6 +6,8 @@ import sys
 import subprocess
 import uuid
 import shutil
+import os
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -39,12 +41,49 @@ from orchestra.validate import validate_structural
 _LIVE_DONE_STATUSES = {"archived"}
 
 
-def _start_supervisor(root: Path, manifest: Path) -> subprocess.Popen[str]:
-    return subprocess.Popen(
-        [sys.executable, "-m", "orchestra.supervisor", str(manifest)],
-        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, start_new_session=True, text=True,
-    )
+def _start_supervisor(root: Path, attempt, config: Config) -> tuple[int, str]:
+    if not config.sandbox.enabled:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "orchestra.supervisor", str(attempt.path)],
+            cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True, text=True,
+        )
+        return process.pid, ""
+
+    unit = str(attempt.data["configuration"]["outer_sandbox_unit"])
+    worktree = Path(attempt.data["worktree"])
+    properties = ["ProtectSystem=strict", "ProtectHome=read-only",
+                  f"ReadWritePaths={attempt.directory}"]
+    if attempt.data["role"] == "worker":
+        properties.append(f"ReadWritePaths={worktree}")
+        common_git = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=worktree, text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        properties.append(f"ReadWritePaths={common_git}")
+    for _source, target in attempt.data["configuration"].get("read_only_binds", ()):
+        properties.append(f"ReadOnlyPaths={target}")
+    argv = [config.sandbox.executable, "--user", "--quiet", "--collect", "--unit", unit,
+            f"--working-directory={root}",
+            f"--setenv=ORCHESTRA_OUTER_SANDBOX={unit}",
+            f"--setenv=PATH={os.environ.get('PATH', '')}"]
+    for prop in properties:
+        argv += ["--property", prop]
+    argv += ["--", sys.executable, "-m", "orchestra.supervisor", str(attempt.path)]
+    result = subprocess.run(argv, text=True, capture_output=True, check=False)
+    if result.returncode:
+        raise RuntimeError(f"outer supervisor service failed: {result.stderr.strip()}")
+    for _ in range(40):
+        query = subprocess.run(
+            ["systemctl", "--user", "show", "--property=MainPID", "--value", unit],
+            text=True, capture_output=True, check=False,
+        )
+        if query.returncode == 0 and query.stdout.strip().isdigit():
+            pid = int(query.stdout.strip())
+            if pid > 0:
+                return pid, unit
+        time.sleep(0.05)
+    raise RuntimeError(f"outer supervisor service {unit} did not expose a MainPID")
 
 
 def done_numbers(root: str | Path, project: Project) -> set[int]:
@@ -198,7 +237,10 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                 parent = store.latest(project.name, issue.number, role)
                 retry_parent = (parent if parent and parent.data.get("retry_disposition")
                                 in {"resume", "fresh_attempt"} else None)
+                chain_start_sha = (str(retry_parent.data.get("start_commit", start_sha))
+                                   if retry_parent else start_sha)
                 attempt_id = f"{project.name}-{issue.number:03d}-{role}-{uuid.uuid4().hex[:12]}"
+                supervisor_unit = f"orchestra-supervisor-{attempt_id.replace('_', '-')[:40]}"
                 attempt_config = {
                     "kind": harness.kind, "executable": harness.executable,
                     "reasoning_effort": harness.reasoning_effort,
@@ -212,6 +254,7 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                     "outer_sandbox_enabled": config.sandbox.enabled,
                     "outer_sandbox_kind": config.sandbox.kind,
                     "outer_sandbox_executable": config.sandbox.executable,
+                    "outer_sandbox_unit": supervisor_unit,
                     "read_only_binds": [[str(source), str(target)]
                                         for source, target in read_only_binds],
                 }
@@ -219,7 +262,8 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                 attempt = store.create(
                     attempt_id=attempt_id, project=project.name, number=issue.number,
                     role=role, harness=harness.kind, model=role_cfg.model,
-                    worktree=Path(workdir), branch=branch_name(issue), start_commit=start_sha,
+                    worktree=Path(workdir), branch=branch_name(issue),
+                    start_commit=chain_start_sha,
                     prompt=prompt_text, instruction_bundle=instructions,
                     configuration=attempt_config, capabilities=adapter.capabilities,
                     parent_attempt=retry_parent.attempt_id if retry_parent else None,
@@ -239,14 +283,15 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                         )
                     except Exception as exc:  # noqa: BLE001 - reconciler owns queue outcome
                         store.update(attempt, preflight="failed", preflight_error=str(exc))
-                supervisor = _start_supervisor(root, attempt.path)
+                supervisor_pid, supervisor_unit = _start_supervisor(root, attempt, config)
                 reg[key] = WorkerHandle(
                     project=project.name, number=issue.number, role=role,
-                    branch=branch_name(issue), worktree=str(workdir), pid=supervisor.pid,
+                    branch=branch_name(issue), worktree=str(workdir), pid=supervisor_pid,
                     attempt_id=attempt_id, manifest=str(attempt.path),
                     stdout=str(attempt.stdout_path), stderr=str(attempt.stderr_path),
-                    started=started, start_sha=start_sha,
-                    proc_start=process_start_time(supervisor.pid) or "",
+                    started=started, start_sha=chain_start_sha,
+                    proc_start=process_start_time(supervisor_pid) or "",
+                    supervisor_unit=supervisor_unit,
                 )
                 launched.append(key)
             except Exception as exc:  # noqa: BLE001 — isolate one bad issue from the rest
@@ -262,7 +307,9 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                         branch=branch_name(issue), worktree=str(workdir), pid=0,
                         attempt_id=attempt.attempt_id, manifest=str(attempt.path),
                         stdout=str(attempt.stdout_path), stderr=str(attempt.stderr_path),
-                        started=started, start_sha=start_sha, proc_start="",
+                        started=started, start_sha=(str(attempt.data.get("start_commit", start_sha))),
+                        proc_start="",
+                        supervisor_unit=str(attempt_config.get("outer_sandbox_unit", "")),
                     )
                 continue
     finally:

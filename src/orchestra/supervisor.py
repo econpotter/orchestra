@@ -53,33 +53,15 @@ def _role_result(attempt: Attempt, normalized: list[NormalizedEvent]):
         return None
 
 
-def _systemd_unit(attempt: Attempt) -> str:
-    return f"orchestra-{attempt.attempt_id.replace('_', '-')[:48]}"
-
-
 def _outer_argv(argv: list[str], attempt: Attempt, config: dict[str, Any]) -> list[str]:
     if config.get("outer_sandbox_enabled"):
-        if config.get("outer_sandbox_kind") != "systemd":
-            raise RuntimeError("unsupported outer sandbox kind")
-        worktree = Path(attempt.data["worktree"])
-        unit = _systemd_unit(attempt)
-        properties = ["ProtectSystem=strict", "ProtectHome=read-only",
-                      f"ReadWritePaths={attempt.directory}"]
-        if attempt.data["role"] == "worker":
-            properties.append(f"ReadWritePaths={worktree}")
-            common_git = subprocess.run(
-                ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                cwd=worktree, text=True, capture_output=True, check=True,
-            ).stdout.strip()
-            properties.append(f"ReadWritePaths={common_git}")
-        for _source, target in config.get("read_only_binds", ()):
-            properties.append(f"ReadOnlyPaths={target}")
-        prefix = [str(config.get("outer_sandbox_executable", "systemd-run")), "--user",
-                  "--pipe", "--wait", "--collect", "--quiet", "--unit", unit,
-                  f"--working-directory={worktree}"]
-        for prop in properties:
-            prefix += ["--property", prop]
-        return prefix + ["--", *argv]
+        unit = str(config.get("outer_sandbox_unit", ""))
+        if config.get("outer_sandbox_kind") != "systemd" \
+                or os.environ.get("ORCHESTRA_OUTER_SANDBOX") != unit:
+            raise RuntimeError("verified outer sandbox is not active")
+        return argv
+    if config.get("read_only_binds"):
+        raise RuntimeError("read-only worktree seeds require the outer sandbox")
     return argv
 
 
@@ -119,6 +101,12 @@ def run_attempt(manifest_path: str | Path) -> int:
     instructions = attempt.instructions_path.read_text()
     if instructions:
         prompt += "\n\n# Resolved project instructions\n\n" + instructions
+    prompt += (
+        "\n\n# Required final response\n\n"
+        "Your final response must be only one JSON object matching this exact schema. "
+        "Do not wrap it in Markdown or add prose before or after it.\n\n"
+        + attempt.schema_path.read_text()
+    )
     normalized: list[NormalizedEvent] = []
     malformed = False
     lock = threading.Lock()
@@ -142,7 +130,6 @@ def run_attempt(manifest_path: str | Path) -> int:
     store.update(
         attempt, state="running", pid=proc.pid,
         proc_start=process_start_time(proc.pid) or "", started_at=_now(),
-        harness_version=str(config.get("harness_version", "")),
     )
 
     def read_stdout() -> None:
@@ -227,12 +214,6 @@ def run_attempt(manifest_path: str | Path) -> int:
         elif has_active_tools and tool_limit and now - oldest_active > tool_limit:
             limit_triggered = "active_tool_seconds"
         if limit_triggered:
-            if config.get("outer_sandbox_enabled") \
-                    and config.get("outer_sandbox_kind") == "systemd":
-                subprocess.run(
-                    ["systemctl", "--user", "stop", _systemd_unit(attempt)],
-                    capture_output=True, check=False,
-                )
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -250,6 +231,13 @@ def run_attempt(manifest_path: str | Path) -> int:
     process_exit = proc.wait()
     stdout_thread.join()
     stderr_thread.join()
+    process_completed_at = _now()
+    _atomic_json(attempt.process_path, {
+        "process_exit": process_exit,
+        "process_signal": -process_exit if process_exit < 0 else None,
+        "completed_at": process_completed_at,
+        "limit_triggered": limit_triggered,
+    })
 
     result = _role_result(attempt, normalized)
     if result is not None:
@@ -267,7 +255,7 @@ def run_attempt(manifest_path: str | Path) -> int:
     else:
         outcome = adapter.classify(process_exit=process_exit, events=normalized, result=result)
     store.update(
-        attempt, state="completed", process_exit=process_exit, completed_at=_now(),
+        attempt, state="completed", process_exit=process_exit, completed_at=process_completed_at,
         process_signal=(-process_exit if process_exit < 0 else None),
         terminal_outcome=outcome.terminal, failure_category=outcome.category,
         failure_evidence=outcome.evidence, limit_triggered=limit_triggered,

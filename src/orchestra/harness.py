@@ -62,7 +62,6 @@ def role_schema(role: str) -> dict[str, Any]:
     if role not in ROLE_OUTCOMES:
         raise ValueError(f"unknown role: {role}")
     return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": False,
         "required": [
@@ -196,7 +195,8 @@ class ClaudePrintAdapter:
         if launch.resume_session:
             argv += ["--resume", launch.resume_session]
         argv += [
-            "--model", launch.model, "--output-format", "stream-json", "--verbose",
+            "--model", launch.model, "--effort", launch.reasoning_effort,
+            "--output-format", "stream-json", "--verbose",
             "--json-schema", launch.schema_file.read_text(),
             "--permission-mode", ("bypassPermissions" if launch.sandbox == "danger-full-access"
                                   else "acceptEdits"),

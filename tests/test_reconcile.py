@@ -107,3 +107,28 @@ def test_network_metadata_does_not_hold_by_default(tmp_path: Path):
     config = load_config(tmp_path / "config.yaml")
     reconcile(tmp_path, config)
     assert find_issue(read_queue(tmp_path / "queue" / "wf.md"), 1).status == "validated"
+
+
+def test_recover_finalization_uses_durable_process_and_structured_evidence(tmp_path: Path):
+    from orchestra.attempt import AttemptStore
+    from orchestra.harness import CodexExecAdapter, role_schema
+    from orchestra.reconcile import _recover_finalization
+    from orchestra.supervisor import run_attempt
+
+    fake = Path(__file__).parent / "fake_structured_harness.py"
+    store = AttemptStore(tmp_path)
+    attempt = store.create(
+        attempt_id="recovery", project="wf", number=1, role="worker", harness="codex",
+        model="m", worktree=tmp_path, branch="b", start_commit="a", prompt="p",
+        instruction_bundle="", configuration={
+            "executable": str(fake), "sandbox": "workspace-write", "limits": {},
+        }, capabilities=CodexExecAdapter.capabilities, parent_attempt=None,
+    )
+    attempt.schema_path.write_text(json.dumps(role_schema("worker")))
+    assert run_attempt(attempt.path) == 0
+    store.update(attempt, state="running", terminal_outcome="", failure_category="")
+    assert _recover_finalization(store, attempt) is True
+    recovered = store.load("recovery")
+    assert recovered.data["state"] == "completed"
+    assert recovered.data["terminal_outcome"] == "success"
+    assert recovered.data["recovered_finalization"] is True

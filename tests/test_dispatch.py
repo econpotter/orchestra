@@ -2,6 +2,8 @@ import subprocess
 import sys
 import time
 import json
+
+import pytest
 from pathlib import Path
 
 from orchestra.config import load_config
@@ -11,6 +13,22 @@ from orchestra.selection import pid_alive
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FAKE = REPO_ROOT / "tests" / "fake_agent.py"
+
+
+@pytest.fixture(autouse=True)
+def _launch_supervisors_without_host_systemd(monkeypatch):
+    """Dispatch unit tests do not depend on a user systemd manager."""
+    import orchestra.dispatch as dispatch_module
+
+    def launch(root, attempt, _config):
+        process = subprocess.Popen(
+            [sys.executable, "-m", "orchestra.supervisor", str(attempt.path)],
+            cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True, text=True,
+        )
+        return process.pid, ""
+
+    monkeypatch.setattr(dispatch_module, "_start_supervisor", launch)
 
 CONFIG = f"""\
 slots: 5
