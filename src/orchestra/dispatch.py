@@ -97,6 +97,9 @@ def _supervisor_service_argv(root: Path, attempt, config: Config) -> list[str]:
         "--tmpfs", "/tmp",
         "--chdir", str(root),
     ]
+    for configured_path in config.sandbox.tmpfs_paths:
+        path = str(Path(configured_path).expanduser())
+        filesystem_argv += ["--dir", path, "--tmpfs", path]
     for path in read_write_paths:
         filesystem_argv += ["--bind", path, path]
     for source, target in read_only_binds:
@@ -348,6 +351,7 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                     "outer_sandbox_kind": config.sandbox.kind,
                     "outer_sandbox_executable": config.sandbox.executable,
                     "filesystem_sandbox_executable": config.sandbox.filesystem_executable,
+                    "filesystem_sandbox_tmpfs_paths": list(config.sandbox.tmpfs_paths),
                     "outer_sandbox_unit": supervisor_unit,
                     "read_only_binds": [[str(source), str(target)]
                                         for source, target in read_only_binds],

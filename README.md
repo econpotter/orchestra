@@ -53,7 +53,9 @@ effective execution-envelope fingerprint.
 Sandboxed runs require both `systemd-run` and Bubblewrap (`bwrap`) on the host. The transient
 user service owns process lifetime only; Bubblewrap enforces the read-only root, writable attempt
 paths, and masked personal harness state. Orchestra fails dispatch explicitly if `bwrap` is
-missing. Network access remains shared so the harness can reach its model API.
+missing. Configured `sandbox.tmpfs_paths` (by default `~/.cache`) give each service private,
+writable tool caches without exposing the operator's cache. Network access remains shared so
+the harness can reach its model API.
 
 ## Create a separate workspace
 

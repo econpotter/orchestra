@@ -72,7 +72,8 @@ A **tick** is one `dispatch` then `reconcile`:
   Sandboxed workers additionally require `bwrap` on `PATH`. Each worker runs Bubblewrap inside
   its transient user service: systemd owns process lifetime only, while Bubblewrap enforces the
   filesystem boundary. Orchestra fails dispatch if the configured filesystem sandbox
-  executable is absent.
+  executable is absent. `sandbox.tmpfs_paths` defaults to `~/.cache`, giving package managers
+  a private writable cache per service while the operator's cache remains hidden.
   - **systemd gotchas the shipped unit handles (keep them):** `KillMode=process` — a
     oneshot's default cgroup kill reaps the detached agents the instant `tick` exits, so
     they die mid-run. `Environment=PATH=…` — user services get a minimal PATH; it must include

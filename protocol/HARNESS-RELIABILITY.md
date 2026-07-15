@@ -336,7 +336,8 @@ not combined with Bubblewrap: some hosts do not enforce them, and on others thei
 namespace prevents Bubblewrap from creating the enforcing namespace. A harness may bypass its
 own sandbox only when Orchestra verifies that this external Bubblewrap boundary is active.
 Missing or failed Bubblewrap is an execution-boundary error, not a model or command-yield
-failure. Network remains shared so the harness can reach its model API.
+failure. Configured tool-cache paths are private writable tmpfs mounts, not writable views of
+the operator's cache. Network remains shared so the harness can reach its model API.
 
 ## Compatibility and protocol drift
 

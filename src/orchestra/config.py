@@ -51,6 +51,7 @@ class Sandbox:
     kind: str = "systemd"
     executable: str = "systemd-run"
     filesystem_executable: str = "bwrap"
+    tmpfs_paths: tuple[str, ...] = ("~/.cache",)
 
 
 @dataclass
@@ -122,6 +123,7 @@ def load_config(path: str | Path) -> Config:
         kind=str(sb.get("kind", "systemd")),
         executable=str(sb.get("executable", "systemd-run")),
         filesystem_executable=str(sb.get("filesystem_executable", "bwrap")),
+        tmpfs_paths=tuple(str(path) for path in sb.get("tmpfs_paths", ("~/.cache",))),
     )
     workflows = {
         name: {str(k): str(v) for k, v in (block or {}).items()}
@@ -238,6 +240,9 @@ def validate_config(config: Config) -> None:
             )
     if config.sandbox.enabled and config.sandbox.kind != "systemd":
         raise ValueError("config: sandbox.kind must be 'systemd'")
+    for path in config.sandbox.tmpfs_paths:
+        if not path or not Path(path).expanduser().is_absolute():
+            raise ValueError("config: sandbox.tmpfs_paths must contain absolute paths")
     # The semantic validator agent runs at the repo root with skip-permissions; without the
     # sandbox it is unconfined and could write queue/ (violating the single-writer invariant).
     # Refuse the unsafe combination rather than launch it. (Default semantic is false → no

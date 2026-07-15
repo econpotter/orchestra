@@ -198,6 +198,9 @@ def test_dispatch_records_instruction_provenance_and_isolated_service_envelope(
     assert ["--tmpfs", "/tmp"] in [
         argv[index:index + 2] for index in range(bwrap, len(argv) - 1)
     ]
+    assert ["--tmpfs", str(Path.home() / ".cache")] in [
+        argv[index:index + 2] for index in range(bwrap, len(argv) - 1)
+    ]
     assert ["--bind", str(attempt.directory), str(attempt.directory)] in [
         argv[index:index + 3] for index in range(bwrap, len(argv) - 2)
     ]

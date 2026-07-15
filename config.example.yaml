@@ -39,7 +39,7 @@ harnesses:
 # systemd owns process lifetime; Bubblewrap enforces the filesystem boundary. Both are
 # required when sandboxing is enabled.
 sandbox: {enabled: true, kind: systemd, executable: systemd-run,
-          filesystem_executable: bwrap}
+          filesystem_executable: bwrap, tmpfs_paths: [~/.cache]}
 workflows:
   python:
     lint: "uv run ruff check"
