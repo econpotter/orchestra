@@ -26,7 +26,9 @@ in Phase B; the deterministic helpers below are Phase A.)
 
 - `tools/dispatch --root ROOT` — status→agent router. Reads every project's queue,
   selects eligible issues (`role_for_issue`: status routable, no active handle,
-  dependencies done) up to `config.slots`, lowest Priority first. Creates a worktree
+  dependencies done) up to `config.slots`, lowest Priority first. An unapproved `open`
+  network issue is refused before validator dispatch when `hold_network_issues` is enabled.
+  Creates a worktree
   for first-time workers, creates a durable attempt manifest, launches the supervised
   configured harness, and records its attempt ID in `.orchestra/workers.json`. **Writes only
   workers.json — never the queue.** Routing: open→validator, validated|needs_rework→
@@ -110,8 +112,9 @@ no executable integration or rollout gate. See `HARNESS-RELIABILITY.md`.
 
 ## Control surface (Phase E)
 The `orchestra` CLI is the human/agent entrypoint (the `tools/*` scripts remain for
-systemd). Commands: `issue add` (also `--from-plan`), `issue list`/`show`, `status`,
-`logs`, `diff`, `approve`, `reject`, `kill`, `project add`, `pause`/`resume`,
+systemd). Commands: `issue add` (also `--from-plan`, `--held`, and `--network`),
+`issue list`/`show`, `status`, `logs`, `diff`, `approve`, `reject`, `hold`, `release`,
+`kill`, `project add`, `pause`/`resume`,
 `dispatch`/`reconcile`/`tick`, `guide`, `new-project` — scaffold + register a project
 from the dual-language template (overlay `variants/`, `init.sh`); `--lang python|r`,
 `--stage`. Read commands take `--json`. The queue stays markdown; the CLI is the

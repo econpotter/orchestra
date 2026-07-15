@@ -7,7 +7,7 @@ import pytest
 
 from orchestra.config import load_config
 from orchestra.dispatch import dispatch
-from orchestra.queue import find_issue, read_queue
+from orchestra.queue import find_issue, read_queue, write_queue
 from orchestra.reconcile import reconcile
 from orchestra.registry import load_registry
 from orchestra.selection import pid_alive
@@ -20,12 +20,16 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
 
-def _setup(root: Path, *, status: str = "validated", network: bool = False) -> None:
+def _setup(
+    root: Path, *, status: str = "validated", network: bool = False,
+    network_approved: bool = False, hold_network: bool = False,
+) -> None:
     (root / "queue").mkdir()
     (root / "queue" / "wf.md").write_text(
         f"## #001 wf: task\nStatus: {status}\nPriority: 1\nPlan: null\nSpec: null\n"
         f"Depends On: null\nRetries: 0\nWorker: null\nNetwork: "
-        f"{'true' if network else 'false'}\nAcceptance:\n- [ ] done\n"
+        f"{'true' if network else 'false'}\nNetwork-Approved: "
+        f"{'true' if network_approved else 'false'}\nAcceptance:\n- [ ] done\n"
         "### Decisions\n### Blocked Reason\n"
     )
     (root / "PROJECTS.md").write_text(
@@ -48,7 +52,7 @@ harnesses:
     preflight: false
     attempts_cap: 2
 sandbox: {{ enabled: false }}
-hold_network_issues: false
+hold_network_issues: {'true' if hold_network else 'false'}
 """)
     repo = root / "projects" / "wf"
     repo.mkdir(parents=True)
@@ -118,6 +122,61 @@ def test_network_metadata_does_not_hold_by_default(tmp_path: Path):
     config = load_config(tmp_path / "config.yaml")
     reconcile(tmp_path, config)
     assert find_issue(read_queue(tmp_path / "queue" / "wf.md"), 1).status == "validated"
+
+
+def test_held_status_remains_sticky_when_network_policy_is_off(tmp_path: Path):
+    _setup(tmp_path, status="held", network=True, network_approved=True)
+    config = load_config(tmp_path / "config.yaml")
+
+    assert reconcile(tmp_path, config) == []
+    issue = find_issue(read_queue(tmp_path / "queue" / "wf.md"), 1)
+    assert issue.status == "held"
+    assert issue.network_approved is False
+
+
+def test_held_edit_survives_terminal_attempt_reconciliation(tmp_path: Path, monkeypatch):
+    _setup(tmp_path)
+    monkeypatch.setenv("ORCHESTRA_FAKE_MODE", "commit")
+    config = load_config(tmp_path / "config.yaml")
+    assert dispatch(tmp_path, config, started="test") == ["wf#001"]
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        registry = load_registry(tmp_path / ".orchestra" / "workers.json")
+        if all(not pid_alive(handle.pid) for handle in registry.values()):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("supervisor did not exit")
+    issues = read_queue(tmp_path / "queue" / "wf.md")
+    find_issue(issues, 1).status = "held"
+    write_queue(tmp_path / "queue" / "wf.md", issues)
+
+    reconcile(tmp_path, config)
+
+    assert find_issue(read_queue(tmp_path / "queue" / "wf.md"), 1).status == "held"
+    assert load_registry(tmp_path / ".orchestra" / "workers.json") == {}
+
+
+def test_network_policy_holds_unapproved_open_issue_before_validation(tmp_path: Path):
+    _setup(tmp_path, status="open", network=True, hold_network=True)
+    config = load_config(tmp_path / "config.yaml")
+
+    reconcile(tmp_path, config)
+
+    assert find_issue(read_queue(tmp_path / "queue" / "wf.md"), 1).status == "held"
+
+
+def test_network_recovery_does_not_reapply_prevalidation_hold(
+    tmp_path: Path, monkeypatch,
+):
+    _setup(
+        tmp_path, network=True, network_approved=True, hold_network=True,
+    )
+
+    status, manifest = _run(tmp_path, monkeypatch, "session_limit")
+
+    assert status == "validated"
+    assert manifest["retry_disposition"] == "resume"
 
 
 def test_recover_finalization_uses_durable_process_and_structured_evidence(tmp_path: Path):

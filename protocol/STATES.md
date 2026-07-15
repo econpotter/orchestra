@@ -6,7 +6,7 @@ Statuses an issue moves through. `dispatch` records handles in workers.json and 
 |---|---|---|
 | open | newly promoted by a human; not yet validated | human |
 | validated | passed validate (structural + optional semantic); dispatchable to a worker | reconcile |
-| held | passed validate under the opt-in network-hold policy; parked pending `orchestra release` | reconcile |
+| held | explicitly parked before validation or worker dispatch | human / reconcile network gate |
 | in_progress | a worker is running on it | reconcile (on dispatch) |
 | committed | worker finished with a commit on the branch; awaiting verify | reconcile |
 | needs_rework | verify rejected; re-dispatch to worker with feedback (Retries++) | reconcile |
@@ -24,7 +24,8 @@ Statuses an issue moves through. `dispatch` records handles in workers.json and 
 ## Lifecycle
 ```
 open --validate(pass)--> validated --dispatch--> in_progress
-open --validate(pass) + Network + hold_network_issues--> held --release--> validated
+open + unapproved Network + hold_network_issues --> held --release--> open
+open --validate(pass)--> validated
 open --validate(fail)--> blocked (invalid)
 in_progress --commit--> committed --verify(accept)--> awaiting_review --human approve (merge)--> archived
 in_progress --self-reported stuck--> blocked
@@ -44,18 +45,26 @@ cancellation failures block without retry. A worker result and branch delta must
 `Crash-Retries` (issue field) counts these bounces and resets to 0 whenever the issue
 reaches a terminal via a real result (worker commit, verifier accept/reject), so the cap
 bounds a crash *loop*, not the issue's lifetime. Past the cap → `blocked` with the crash
-reason. A network worker crash re-queues normally unless the optional hold policy is on.
+reason. A network worker crash re-queues normally; the optional hold policy is a one-time
+pre-validation gate, not a retry gate.
 
 ## Network metadata and optional gate
 An issue with `Network: true` is dispatchable by default. The field records that a task
 uses external data or services so operators and prompts can treat it accordingly; ordinary
 network access does not require a manual state transition.
 
-Set `hold_network_issues: true` in `config.yaml` to require an explicit gate for every
-network issue. Under that policy, successful validation and transient worker retries go
-to `held`, which is not dispatchable. `orchestra release <project> <number>` promotes
-`held → validated`; it refuses any other status. Turning the policy off promotes existing
-network issues from `held` to `validated` during the next reconcile.
+Set `hold_network_issues: true` in `config.yaml` to require an explicit gate for every new
+network issue. Dispatch refuses an unapproved `open` network issue before semantic validation,
+and reconciliation records it as `held`. `orchestra release <project> <number>` records
+`Network-Approved: true` and moves `held → open`, so normal validation runs next. Approval is
+persistent across validation, worker recovery, and verifier rework. `orchestra hold` revokes
+approval for a network issue.
+
+`held` is sticky operator state. Issues may be submitted with `issue add --held`, changed with
+`orchestra hold`, or edited directly in the queue. Reconciliation never releases them, including
+when `hold_network_issues` is turned off. Only explicit `release` returns them to `open`.
+`orchestra hold` accepts inactive `open`, `validated`, `needs_rework`, and `blocked` issues; it
+refuses active, committed, review, and archived work.
 
 At run time the `Network` flag is **advisory** — there is no per-issue network jail.
 `sandbox.enabled` provides **filesystem** confinement, not network isolation. Orchestra runs

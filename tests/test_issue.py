@@ -177,6 +177,7 @@ Plan: null
 Spec: null
 Depends On: null
 Network: true
+Network-Approved: true
 Retries: 0
 Crash-Retries: 1
 Worker: null
@@ -187,9 +188,11 @@ Acceptance:
 """
     issue = parse_issue(block)
     assert issue.network is True
+    assert issue.network_approved is True
     assert issue.crash_retries == 1
     rendered = render_issue(issue)
     assert "Network: true" in rendered
+    assert "Network-Approved: true" in rendered
     assert "Crash-Retries: 1" in rendered
     assert parse_issue(rendered) == issue
 
@@ -198,6 +201,7 @@ def test_legacy_block_defaults_new_fields():
     # A legacy block without Network/Crash-Retries parses to safe defaults and round-trips.
     issue = parse_issue(BLOCK)
     assert issue.network is False
+    assert issue.network_approved is False
     assert issue.crash_retries == 0
     assert parse_issue(render_issue(issue)) == issue
 

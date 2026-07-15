@@ -32,3 +32,16 @@ def test_from_plan_apply_writes_issues(tmp_path, capsys):
     issues = read_queue(tmp_path / "queue" / "wf.md")
     assert [i.title for i in issues] == ["Task 1: a", "Task 2: b"]
     assert all(i.status == "open" for i in issues)
+
+
+def test_from_plan_apply_supports_held_network_issues(tmp_path, capsys):
+    plan = _setup(tmp_path)
+    rc = main([
+        "--root", str(tmp_path), "issue", "add", "wf",
+        "--from-plan", str(plan), "--apply", "--force", "--held", "--network",
+    ])
+    assert rc == 0
+    issues = read_queue(tmp_path / "queue" / "wf.md")
+    assert all(issue.status == "held" for issue in issues)
+    assert all(issue.network is True for issue in issues)
+    assert all(issue.network_approved is False for issue in issues)

@@ -22,13 +22,16 @@ Split a whole plan into proposed issues (review before writing):
     orchestra issue add --from-plan docs/plans/foo.md <project>        # dry-run
     orchestra issue add --from-plan docs/plans/foo.md <project> --apply
 
+Add `--network` for work using external services and `--held` to submit work parked.
+
 **Commit the plan and spec to the project's base branch first.** A worker branches off
 base and cannot see uncommitted planner files; `issue add` refuses a Plan/Spec missing
 from the base branch (pass `--force` to add anyway). Mark work that uses external data or
-services with `Network: true`; this is visible advisory metadata and is dispatchable by
-default. Installations that require explicit approval for every network issue can set
-`hold_network_issues: true` in `config.yaml`; those issues validate to `held` and wait for
-`orchestra release <project> <n>`. At run time the flag is not a network jail.
+services with `--network`; this is visible advisory metadata and is dispatchable by default.
+Installations that require explicit approval for every network issue can set
+`hold_network_issues: true` in `config.yaml`; those issues become `held` before validation.
+`orchestra release <project> <n>` returns one to `open` with durable approval. At run time
+the flag is not a network jail.
 `sandbox.enabled` confines the filesystem but shares the network because an agent must
 reach its own model API.
 
@@ -38,7 +41,8 @@ reach its own model API.
     orchestra issue show <project> <n>     # full issue + decisions + diff pointer
     orchestra approve <project> <n>        # merge + archive an awaiting_review issue
     orchestra reject  <project> <n> --note "why"   # awaiting_review -> needs_rework; blocked -> open
-    orchestra release <project> <n>        # release an opt-in/legacy held issue
+    orchestra hold    <project> <n>        # park inactive work until explicit release
+    orchestra release <project> <n>        # held -> open for normal validation
     orchestra logs <project> <n> -f        # watch a worker
 
 `reject` is state-sensitive: it sends reviewed work back for revision, while a blocked
@@ -48,7 +52,7 @@ dispatch a worker itself.
 ## Execution environment
 The host scheduler owns execution. From Herdr or another confined agent session, use
 read-only commands (`guide`, `status`, `issue list`, `issue show`, `logs`, and `diff`) and
-queue-only controls (`issue add`, `reject`, and `release`). These commands do not launch a
+queue-only controls (`issue add`, `reject`, `hold`, and `release`). These commands do not launch a
 worker.
 
 **Do not run `orchestra tick`, `orchestra dispatch`, or `orchestra reconcile` from

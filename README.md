@@ -175,7 +175,7 @@ The plan or spec must be committed to the project’s base branch before dispatc
 [`protocol/STATES.md`](protocol/STATES.md) for lifecycle semantics.
 
 Key commands include `issue add`, `issue list`, `issue show`, `status`, `logs`, `diff`,
-`approve`, `reject`, `kill`, `project add`, `pause`, `resume`, `dispatch`, `reconcile`, and
+`approve`, `reject`, `hold`, `release`, `kill`, `project add`, `pause`, `resume`, `dispatch`, `reconcile`, and
 `tick`. Use `orchestra attempt explain ATTEMPT_ID` for retained failure and provenance
 evidence. Run `orchestra guide` or `orchestra <command> --help` for the live interface.
 
@@ -208,6 +208,8 @@ so detached harness processes survive the tick that launched them. See
   lifecycle writer, while explicit operator commands perform intentional transitions.
 - Structural validation is deterministic by default. Set `validate.semantic: true` to add an
   LLM validator stage.
+- `hold_network_issues: true` parks unapproved network issues before validation. Held issues
+  are sticky and return to `open` only through explicit `release`.
 - `review.autoapprove: false` stops verifier-approved work for human review; `true` merges it
   during reconciliation.
 - `slots` limits in-flight Orchestra roles, not subagents created inside a harness run.

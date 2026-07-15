@@ -342,6 +342,7 @@ def cmd_issue_show(args: argparse.Namespace) -> int:
         "project": args.project, "number": issue.number, "title": issue.title,
         "status": issue.status, "priority": issue.priority, "plan": issue.plan,
         "spec": issue.spec, "depends_on": issue.depends_on, "retries": issue.retries,
+        "network": issue.network, "network_approved": issue.network_approved,
         "acceptance": [{"checked": a.checked, "text": a.text} for a in issue.acceptance],
         "decisions": issue.decisions, "blocked_reason": issue.blocked_reason,
         "verifier_feedback": issue.verifier_feedback,
@@ -437,10 +438,11 @@ def cmd_issue_add(args: argparse.Namespace) -> int:
         n = next_number(active, archived)
         for p in proposals:
             new.append(Issue(
-                number=n, project=args.project, title=p["title"], status="open",
+                number=n, project=args.project, title=p["title"],
+                status="held" if args.held else "open",
                 priority=args.priority, plan=p["plan"], spec=None, depends_on=[],
                 retries=0, worker=None, acceptance=[], decisions="",
-                blocked_reason="", verifier_feedback="",
+                blocked_reason="", verifier_feedback="", network=args.network,
             ))
             n += 1
         qf.parent.mkdir(parents=True, exist_ok=True)
@@ -462,12 +464,13 @@ def cmd_issue_add(args: argparse.Namespace) -> int:
         return 2
     number = next_number(active, archived)
     issue = Issue(
-        number=number, project=args.project, title=args.title, status="open",
+        number=number, project=args.project, title=args.title,
+        status="held" if args.held else "open",
         priority=args.priority, plan=args.plan, spec=args.spec,
         depends_on=depends_on,
         retries=0, worker=None,
         acceptance=[AcceptanceItem(checked=False, text=t) for t in (args.accept or [])],
-        decisions="", blocked_reason="", verifier_feedback="",
+        decisions="", blocked_reason="", verifier_feedback="", network=args.network,
     )
     qf.parent.mkdir(parents=True, exist_ok=True)
     write_queue(qf, active + [issue])
@@ -631,9 +634,51 @@ def cmd_release(args: argparse.Namespace) -> int:
     if issue.status != "held":
         print(f"issue #{args.number} is {issue.status!r}; release expects held", file=sys.stderr)
         return 3
-    issue.status = "validated"
+    issue.status = "open"
+    if issue.network:
+        issue.network_approved = True
     write_queue(qf, issues)
-    print(f"released {args.project}#{args.number:03d} -> validated")
+    print(f"released {args.project}#{args.number:03d} -> open")
+    return 0
+
+
+def cmd_hold(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    project = _resolve_project(args)
+    if project is None:
+        return 2
+    qf = layout.queue_file(root, args.project)
+    issues = read_queue(qf) if qf.exists() else []
+    issue = find_issue(issues, args.number)
+    if issue is None:
+        print(f"issue #{args.number} not found", file=sys.stderr)
+        return 2
+    allowed = {"open", "validated", "needs_rework", "blocked"}
+    if issue.status not in allowed:
+        print(
+            f"issue #{args.number} is {issue.status!r}; hold expects "
+            "open, validated, needs_rework, or blocked",
+            file=sys.stderr,
+        )
+        return 3
+    key = issue_key(args.project, args.number)
+    if key in load_registry(root / ".orchestra" / "workers.json"):
+        print(
+            f"issue #{args.number} has an active or unreconciled attempt; "
+            "kill and reconcile it before holding",
+            file=sys.stderr,
+        )
+        return 3
+    prior_status = issue.status
+    if issue.blocked_reason:
+        audit = f"Held from {prior_status}: {issue.blocked_reason}"
+        issue.decisions = "\n".join(filter(None, (issue.decisions, audit)))
+    issue.status = "held"
+    issue.blocked_reason = ""
+    if issue.network:
+        issue.network_approved = False
+    write_queue(qf, issues)
+    print(f"held {args.project}#{args.number:03d}")
     return 0
 
 
@@ -840,6 +885,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--plan", default=None)
     p_add.add_argument("--spec", default=None)
     p_add.add_argument("--priority", type=int, default=5)
+    p_add.add_argument("--held", action="store_true", help="submit directly as held")
+    p_add.add_argument("--network", action="store_true", help="mark as using external services")
     p_add.add_argument("--accept", action="append", help="acceptance criterion (repeatable)")
     p_add.add_argument(
         "--depends-on", dest="depends_on", default=None,
@@ -881,11 +928,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_retry.set_defaults(func=cmd_retry_merge)
 
     p_release = sub.add_parser(
-        "release", help="release an opt-in or legacy held issue (held->validated)"
+        "release", help="release a held issue for validation (held->open)"
     )
     p_release.add_argument("project")
     p_release.add_argument("number", type=int)
     p_release.set_defaults(func=cmd_release)
+
+    p_hold = sub.add_parser("hold", help="hold an inactive issue until explicit release")
+    p_hold.add_argument("project")
+    p_hold.add_argument("number", type=int)
+    p_hold.set_defaults(func=cmd_hold)
 
     p_diff = sub.add_parser("diff", help="show an issue's branch diff")
     p_diff.add_argument("project")

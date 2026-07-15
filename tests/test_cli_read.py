@@ -41,6 +41,19 @@ def test_issue_show_includes_decisions(tmp_path, capsys):
     assert "chose y" in out and "issue/001-alpha" in out
 
 
+def test_issue_show_json_includes_network_approval(tmp_path, capsys):
+    _setup(tmp_path)
+    queue = tmp_path / "queue" / "wf.md"
+    queue.write_text(queue.read_text().replace(
+        "Depends On: null\n", "Depends On: null\nNetwork: true\nNetwork-Approved: true\n"
+    ))
+
+    assert main(["--root", str(tmp_path), "issue", "show", "wf", "1", "--json"]) == 0
+    info = json.loads(capsys.readouterr().out)
+    assert info["network"] is True
+    assert info["network_approved"] is True
+
+
 def test_issue_show_includes_project_worktree_seeds(tmp_path, capsys):
     _setup(tmp_path)
     projects_path = tmp_path / "PROJECTS.md"

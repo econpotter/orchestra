@@ -1,9 +1,15 @@
 """Queue-time plan/spec-on-base validation (Fix 4) and the `release` command (Fix 3)."""
+import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from orchestra.cli import main
+from orchestra.config import load_config
 from orchestra.queue import find_issue, read_queue, write_queue
+from orchestra.reconcile import reconcile
+from orchestra.registry import WorkerHandle, save_registry
 from orchestra.issue import AcceptanceItem, Issue
 
 
@@ -72,12 +78,14 @@ def _held_issue(root: Path):
     return qf
 
 
-def test_release_promotes_held_to_validated(tmp_path, capsys):
+def test_release_reopens_held_and_approves_network(tmp_path, capsys):
     _setup(tmp_path, commit_plan=True)
     qf = _held_issue(tmp_path)
     rc = main(["--root", str(tmp_path), "release", "wf", "1"])
     assert rc == 0
-    assert find_issue(read_queue(qf), 1).status == "validated"
+    issue = find_issue(read_queue(qf), 1)
+    assert issue.status == "open"
+    assert issue.network_approved is True
 
 
 def test_release_refuses_non_held(tmp_path, capsys):
@@ -91,3 +99,82 @@ def test_release_refuses_non_held(tmp_path, capsys):
     assert rc == 3
     assert "held" in err
     assert find_issue(read_queue(qf), 1).status == "validated"  # unchanged
+
+
+def test_release_under_network_policy_validates_without_reholding(tmp_path, capsys):
+    _setup(tmp_path, commit_plan=True)
+    qf = _held_issue(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "slots: 0\nroles: {}\nhold_network_issues: true\n"
+    )
+
+    assert main(["--root", str(tmp_path), "release", "wf", "1"]) == 0
+    reconcile(tmp_path, load_config(tmp_path / "config.yaml"))
+
+    issue = find_issue(read_queue(qf), 1)
+    assert issue.status == "validated"
+    assert issue.network_approved is True
+
+
+def test_add_supports_held_and_network_flags(tmp_path, capsys):
+    _setup(tmp_path, commit_plan=True)
+    assert main([
+        "--root", str(tmp_path), "issue", "add", "wf", "--title", "held netjob",
+        "--accept", "fetch", "--held", "--network",
+    ]) == 0
+    issue = read_queue(tmp_path / "queue" / "wf.md")[0]
+    assert issue.status == "held"
+    assert issue.network is True
+    assert issue.network_approved is False
+
+
+@pytest.mark.parametrize("status", ["open", "validated", "needs_rework", "blocked"])
+def test_hold_accepts_inactive_preworker_states(tmp_path, capsys, status):
+    _setup(tmp_path, commit_plan=True)
+    qf = _held_issue(tmp_path)
+    issue = find_issue(read_queue(qf), 1)
+    issue.status = status
+    issue.network_approved = True
+    issue.blocked_reason = "prior failure" if status == "blocked" else ""
+    write_queue(qf, [issue])
+
+    assert main(["--root", str(tmp_path), "hold", "wf", "1"]) == 0
+    held = find_issue(read_queue(qf), 1)
+    assert held.status == "held"
+    assert held.network_approved is False
+    assert held.blocked_reason == ""
+    if status == "blocked":
+        assert "prior failure" in held.decisions
+
+
+@pytest.mark.parametrize(
+    "status", ["in_progress", "committed", "awaiting_review", "archived"]
+)
+def test_hold_refuses_active_or_completed_states(tmp_path, capsys, status):
+    _setup(tmp_path, commit_plan=True)
+    qf = _held_issue(tmp_path)
+    issue = find_issue(read_queue(qf), 1)
+    issue.status = status
+    write_queue(qf, [issue])
+
+    assert main(["--root", str(tmp_path), "hold", "wf", "1"]) == 3
+    assert find_issue(read_queue(qf), 1).status == status
+
+
+def test_hold_refuses_issue_with_registered_attempt(tmp_path, capsys):
+    _setup(tmp_path, commit_plan=True)
+    qf = _held_issue(tmp_path)
+    issue = find_issue(read_queue(qf), 1)
+    issue.status = "open"
+    write_queue(qf, [issue])
+    save_registry(tmp_path / ".orchestra" / "workers.json", {
+        "wf#001": WorkerHandle(
+            project="wf", number=1, role="validator", branch="", worktree="",
+            pid=os.getpid(), attempt_id="attempt", manifest="", stdout="", stderr="",
+            started="now", start_sha="", proc_start="",
+        ),
+    })
+
+    assert main(["--root", str(tmp_path), "hold", "wf", "1"]) == 3
+    assert "kill and reconcile" in capsys.readouterr().err
+    assert find_issue(read_queue(qf), 1).status == "open"

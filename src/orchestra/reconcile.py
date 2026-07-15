@@ -9,7 +9,7 @@ from orchestra.attempt import Attempt, AttemptStore
 from orchestra.config import Config
 from orchestra.dispatch import done_numbers
 from orchestra.enginelock import engine_lock
-from orchestra.issue import block_issue, exception_detail
+from orchestra.issue import block_issue, exception_detail, needs_network_approval
 from orchestra.projects import Project, find_project, read_projects
 from orchestra.queue import find_issue, read_queue, write_queue
 from orchestra.registry import issue_key, load_registry, save_registry
@@ -19,13 +19,6 @@ from orchestra.selection import worker_alive
 from orchestra.validate import validate_structural
 
 _REG_PATH = (".orchestra", "workers.json")
-
-
-def _validated_status(issue, config: Config) -> str:
-    """Return the post-validation status under the configured network policy."""
-    if issue.network and config.hold_network_issues:
-        return "held"
-    return "validated"
 
 
 def _merge_failure_reason(exc: BaseException) -> str:
@@ -166,6 +159,12 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
             continue
 
         alive = worker_alive(handle)
+        if issue.status == "held":
+            # A direct queue edit is an operator decision. Retain a live handle so it can
+            # still be killed; discard a terminal handle without changing sticky status.
+            if not alive:
+                del reg[key]
+            continue
         if alive:
             if handle.role == "worker" and issue.status in {"validated", "needs_rework"}:
                 issue.status = "in_progress"
@@ -203,14 +202,14 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
             prior = attempt.data["configuration"].get("dispatch_status", "validated")
             issue.status = ("open" if handle.role == "validator"
                             else "committed" if handle.role == "verifier"
-                            else prior if prior == "needs_rework" else _validated_status(issue, config))
+                            else prior if prior == "needs_rework" else "validated")
         elif decision.action == "committed":
             issue.status = "committed"
             issue.crash_retries = 0
             if result and result.decisions:
                 issue.decisions = "\n".join(filter(None, (issue.decisions, result.decisions)))
         elif decision.action == "validated":
-            issue.status = _validated_status(issue, config)
+            issue.status = "validated"
         elif decision.action == "accept":
             issue.verifier_feedback = ""
             issue.status = "awaiting_review"
@@ -241,10 +240,13 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
         dep_graph = {i.number: i.depends_on for i in issues}
         changed = False
         for issue in issues:
-            if issue.status == "held" and issue.network and not config.hold_network_issues:
-                issue.status = "validated"
+            if issue.status == "held" and issue.network and issue.network_approved:
+                issue.network_approved = False
+                changed = True
+            if needs_network_approval(issue, config.hold_network_issues):
+                issue.status = "held"
                 issue.blocked_reason = ""
-                transitions.append((issue_key(project.name, issue.number), "validated"))
+                transitions.append((issue_key(project.name, issue.number), "held"))
                 changed = True
                 continue
             if issue.status != "open":
@@ -263,7 +265,7 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
                 changed = True
             elif not config.validate_semantic:
                 # Deterministic validation: no LLM validator agent — promote here.
-                issue.status = _validated_status(issue, config)
+                issue.status = "validated"
                 issue.blocked_reason = ""  # clear any stale invalid from a prior cycle
                 transitions.append((issue_key(project.name, issue.number), issue.status))
                 changed = True

@@ -274,8 +274,9 @@ checkpoint protocol. There is no `checkpoint` role outcome or queue state. Overs
 split into dependency-linked, independently verifiable issues; a checkpoint feature may be
 reconsidered only after evidence shows well-sized issues still exhaust context.
 
-When `hold_network_issues` is enabled, network-gated issues retain `held` and explicit
-release behavior. Recovery cannot bypass the configured gate.
+When `hold_network_issues` is enabled, unapproved network issues stop before validation.
+Explicit release records durable approval; later worker recovery and verifier rework do not
+reapply this one-time gate.
 
 ## Health monitoring
 

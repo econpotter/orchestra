@@ -33,6 +33,17 @@ class Issue:
     verifier_feedback: str
     crash_retries: int = 0
     network: bool = False
+    network_approved: bool = False
+
+
+def needs_network_approval(issue: Issue, hold_network_issues: bool) -> bool:
+    """Return whether an open network issue must stop before validation."""
+    return (
+        hold_network_issues
+        and issue.status == "open"
+        and issue.network
+        and not issue.network_approved
+    )
 
 
 def block_issue(issue: Issue, reason: str) -> None:
@@ -164,6 +175,7 @@ def parse_issue(block: str) -> Issue:
         verifier_feedback="\n".join(verifier).strip(),
         crash_retries=crash_retries,
         network=_parse_bool(fields.get("Network", "")),
+        network_approved=_parse_bool(fields.get("Network-Approved", "")),
     )
 
 
@@ -180,6 +192,7 @@ def render_issue(issue: Issue) -> str:
         f"Spec: {_fmt_opt(issue.spec)}",
         f"Depends On: {', '.join(str(d) for d in issue.depends_on) if issue.depends_on else 'null'}",
         f"Network: {'true' if issue.network else 'false'}",
+        f"Network-Approved: {'true' if issue.network_approved else 'false'}",
         f"Retries: {issue.retries}",
         f"Crash-Retries: {issue.crash_retries}",
         f"Worker: {_fmt_opt(issue.worker)}",

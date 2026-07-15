@@ -15,7 +15,7 @@ from orchestra import git_ops, layout
 from orchestra.attempt import AttemptStore
 from orchestra.config import Config, validate_config
 from orchestra.enginelock import engine_lock
-from orchestra.issue import Issue, branch_name
+from orchestra.issue import Issue, branch_name, needs_network_approval
 from orchestra.projects import Project, read_projects
 from orchestra.harness import (
     adapter_for,
@@ -238,6 +238,8 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
         known = {i.number for i in issues}
         dep_graph = {i.number: i.depends_on for i in issues}
         for issue in issues:
+            if needs_network_approval(issue, config.hold_network_issues):
+                continue  # reconcile records the held transition
             role = role_for_issue(issue, active, done)
             if not role:
                 continue

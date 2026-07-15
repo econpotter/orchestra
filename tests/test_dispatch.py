@@ -118,6 +118,22 @@ def test_dispatch_open_issue_launches_validator(tmp_path: Path):
     _wait_all_dead(tmp_path)
 
 
+def test_dispatch_skips_unapproved_open_network_issue_when_policy_holds(tmp_path: Path):
+    issue = _issue(1, "open").replace(
+        "Depends On: null\n", "Depends On: null\nNetwork: true\nNetwork-Approved: false\n"
+    )
+    _setup(tmp_path, issue)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(config_path.read_text() + "hold_network_issues: true\n")
+
+    launched = dispatch(
+        tmp_path, load_config(config_path), started="2026-06-26T00:00:00Z"
+    )
+
+    assert launched == []
+    assert load_registry(tmp_path / ".orchestra" / "workers.json") == {}
+
+
 def test_dispatch_validated_issue_creates_worktree_and_worker(tmp_path: Path):
     _setup(tmp_path, _issue(2, "validated"))
     cfg = load_config(tmp_path / "config.yaml")

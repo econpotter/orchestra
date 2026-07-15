@@ -9,8 +9,9 @@ roles:
              instruction_policy: native_project, delegation: disabled}
 validate: {semantic: false}
 retries_cap: 2
-# Network access is ordinary by default. Set this true only when every issue marked
-# `Network: true` must wait for an explicit `orchestra release` before dispatch.
+# Network access is ordinary by default. Set this true only when each new issue marked
+# `Network: true` must be explicitly released before validation. Existing held issues remain
+# held when this is false.
 hold_network_issues: false
 harnesses:
   codex:
