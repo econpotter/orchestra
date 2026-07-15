@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import signal
 import subprocess
@@ -19,6 +20,7 @@ from orchestra.harness import (
     NormalizedEvent,
     adapter_for,
     parse_role_result,
+    role_contract_instruction,
 )
 from orchestra.selection import process_start_time
 
@@ -65,6 +67,29 @@ def _outer_argv(argv: list[str], attempt: Attempt, config: dict[str, Any]) -> li
     return argv
 
 
+def compose_harness_prompt(
+    base_prompt: str,
+    instructions: str,
+    instruction_policy: str,
+    role: str,
+) -> str:
+    """Compose one harness prompt without duplicating native instructions or schemas."""
+    if instruction_policy == "native_project":
+        sections = [base_prompt]
+    elif instruction_policy == "explicit_bundle":
+        sections = [base_prompt]
+        if instructions:
+            sections.append("# Resolved project instructions\n\n" + instructions)
+    else:
+        raise ValueError(f"unknown instruction policy: {instruction_policy}")
+    sections.append(
+        "# Required terminal response\n\n"
+        "Only your terminal response is schema-constrained; progress may be concise prose. "
+        + role_contract_instruction(role)
+    )
+    return "\n\n".join(sections)
+
+
 def run_attempt(manifest_path: str | Path) -> int:
     manifest_path = Path(manifest_path)
     root = manifest_path.parents[3]
@@ -75,7 +100,9 @@ def run_attempt(manifest_path: str | Path) -> int:
     if attempt.data.get("preflight_error"):
         store.update(
             attempt, state="completed", completed_at=_now(), terminal_outcome="turn_failed",
-            failure_category="harness_failure",
+            failure_category=str(
+                attempt.data.get("preflight_error_category", "harness_failure")
+            ),
             failure_evidence=f"preflight failed: {attempt.data['preflight_error']}",
         )
         return 0
@@ -88,8 +115,16 @@ def run_attempt(manifest_path: str | Path) -> int:
             sandbox=str(config.get("sandbox", "workspace-write")),
             extra_args=tuple(config.get("extra_args", [])),
             resume_session=str(config.get("resume_session", "")),
+            instruction_policy=str(config.get("instruction_policy", "native_project")),
+            delegation=str(config.get("delegation", "disabled")),
         )
         argv = _outer_argv(adapter.build_argv(launch), attempt, config)
+        prompt = compose_harness_prompt(
+            attempt.prompt_path.read_text(),
+            attempt.instructions_path.read_text(),
+            str(config.get("instruction_policy", "native_project")),
+            str(attempt.data["role"]),
+        )
     except Exception as exc:  # noqa: BLE001 - preparation failure must finalize durably
         attempt.stderr_path.write_text(f"supervisor preparation failed: {exc}\n")
         store.update(
@@ -97,15 +132,22 @@ def run_attempt(manifest_path: str | Path) -> int:
             failure_category="environment_failure", failure_evidence=str(exc),
         )
         return 0
-    prompt = attempt.prompt_path.read_text()
-    instructions = attempt.instructions_path.read_text()
-    if instructions:
-        prompt += "\n\n# Resolved project instructions\n\n" + instructions
-    prompt += (
-        "\n\n# Required final response\n\n"
-        "Your final response must be only one JSON object matching this exact schema. "
-        "Do not wrap it in Markdown or add prose before or after it.\n\n"
-        + attempt.schema_path.read_text()
+    launch_evidence = {
+        "argv": argv,
+        "cwd": str(launch.cwd),
+        "environment": {
+            name: os.environ.get(name, "") for name in (
+                "CODEX_HOME", "CLAUDE_CONFIG_DIR", "HOME", "PATH",
+                "ORCHESTRA_OUTER_SANDBOX",
+            )
+        },
+    }
+    store.update(
+        attempt,
+        effective_prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
+        harness_launch_sha256=hashlib.sha256(
+            json.dumps(launch_evidence, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
     )
     normalized: list[NormalizedEvent] = []
     malformed = False

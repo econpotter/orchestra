@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,11 +10,68 @@ from orchestra.harness import (
     HarnessLaunch,
     RoleResult,
     parse_role_result,
+    role_contract_instruction,
     role_schema,
+    preflight_authentication,
+    preflight_harness,
 )
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "harness_protocols"
+
+
+def test_claude_preflight_requires_safe_mode(monkeypatch, tmp_path: Path):
+    executable = tmp_path / "claude"
+    executable.write_text("")
+    executable.chmod(0o755)
+
+    def run(argv, **_kwargs):
+        output = " ".join(("--output-format", "--json-schema", "--setting-sources",
+                           "--resume", "--permission-mode"))
+        if argv[-1] == "--version":
+            output = "2.1.0"
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    monkeypatch.setattr("orchestra.harness.subprocess.run", run)
+    with pytest.raises(RuntimeError, match="--safe-mode"):
+        preflight_harness("claude", str(executable))
+
+
+def test_codex_authentication_preflight_uses_isolated_environment(monkeypatch):
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "Logged in", "")
+
+    monkeypatch.setattr("orchestra.harness.subprocess.run", run)
+    preflight_authentication("codex", "codex", {"CODEX_HOME": "/isolated"})
+    assert calls == [(["codex", "login", "status"], {
+        "text": True, "capture_output": True, "timeout": 15, "check": False,
+        "env": {"CODEX_HOME": "/isolated"},
+    })]
+
+
+def test_codex_authentication_preflight_fails_loud_without_credentials(monkeypatch):
+    monkeypatch.setattr(
+        "orchestra.harness.subprocess.run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "Not logged in", ""),
+    )
+    with pytest.raises(RuntimeError, match="authentication preflight failed"):
+        preflight_authentication("codex", "codex", {})
+
+
+def test_claude_authentication_preflight_uses_isolated_environment(monkeypatch):
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, '{"loggedIn":true}', "")
+
+    monkeypatch.setattr("orchestra.harness.subprocess.run", run)
+    preflight_authentication("claude", "claude", {"CLAUDE_CONFIG_DIR": "/isolated"})
+    assert calls[0][0] == ["claude", "auth", "status", "--json"]
+    assert calls[0][1]["env"] == {"CLAUDE_CONFIG_DIR": "/isolated"}
 
 
 def _events(name: str) -> list[dict]:
@@ -31,17 +89,42 @@ def test_worker_result_schema_is_strict_and_versioned():
     }
 
 
-def test_role_result_rejects_invalid_or_contradictory_values():
+@pytest.mark.parametrize(("role", "outcome"), [
+    ("worker", "committed"),
+    ("validator", "validated"),
+    ("verifier", "accept"),
+    ("verifier", "reject"),
+])
+def test_non_blocked_role_result_requires_empty_failure_category(role: str, outcome: str):
     data = {
         "schema_version": 1,
-        "outcome": "committed",
+        "outcome": outcome,
         "decisions": "",
-        "failure_category": "time_limit",
+        "failure_category": "acceptance_failure",
+        "evidence": "",
+        "requires_human": True,
+    }
+    with pytest.raises(ValueError, match="non-blocked outcome requires empty failure_category"):
+        parse_role_result(role, data)
+    data["failure_category"] = ""
+    data["requires_human"] = False
+    assert parse_role_result(role, data).outcome == outcome
+
+
+@pytest.mark.parametrize("role", ["worker", "validator", "verifier"])
+def test_blocked_role_result_requires_stable_failure_category(role: str):
+    data = {
+        "schema_version": 1,
+        "outcome": "blocked",
+        "decisions": "",
+        "failure_category": "",
         "evidence": "",
         "requires_human": False,
     }
-    with pytest.raises(ValueError, match="successful outcome cannot have failure_category"):
-        parse_role_result("worker", data)
+    with pytest.raises(ValueError, match="blocked outcome requires a stable failure_category"):
+        parse_role_result(role, data)
+    data["failure_category"] = "time_limit"
+    assert parse_role_result(role, data).outcome == "blocked"
 
 
 def test_verifier_reject_is_a_valid_review_outcome_not_infrastructure_failure():
@@ -51,6 +134,15 @@ def test_verifier_reject_is_a_valid_review_outcome_not_infrastructure_failure():
         "requires_human": False,
     })
     assert result.outcome == "reject"
+
+
+@pytest.mark.parametrize("role", ["worker", "validator", "verifier"])
+def test_role_contract_instruction_is_generated_from_role_outcomes(role: str):
+    instruction = role_contract_instruction(role)
+    for outcome in role_schema(role)["properties"]["outcome"]["enum"]:
+        assert outcome in instruction
+    assert "Only blocked" in instruction
+    assert "failure_category" in instruction
 
 
 def test_codex_adapter_builds_reproducible_structured_command(tmp_path: Path):
@@ -66,7 +158,37 @@ def test_codex_adapter_builds_reproducible_structured_command(tmp_path: Path):
                  "--output-last-message", "--color"):
         assert flag in argv
     assert 'model_reasoning_effort="high"' in argv
+    assert argv[argv.index("--disable") + 1] == "multi_agent"
     assert argv[-1] == "-"
+
+
+@pytest.mark.parametrize(("delegation", "flag"), [
+    ("disabled", "--disable"),
+    ("required", "--enable"),
+])
+def test_codex_adapter_owns_delegation_feature(tmp_path: Path, delegation: str, flag: str):
+    launch = HarnessLaunch(
+        executable="codex", model="gpt-test", reasoning_effort="high",
+        cwd=tmp_path, prompt_file=tmp_path / "prompt.md",
+        schema_file=tmp_path / "schema.json", output_file=tmp_path / "provider.json",
+        sandbox="danger-full-access", delegation=delegation,
+    )
+    argv = CodexExecAdapter().build_argv(launch)
+    assert argv[argv.index(flag) + 1] == "multi_agent"
+    opposite = "--enable" if flag == "--disable" else "--disable"
+    assert opposite not in argv
+
+
+def test_codex_allowed_delegation_does_not_override_feature(tmp_path: Path):
+    launch = HarnessLaunch(
+        executable="codex", model="gpt-test", reasoning_effort="high",
+        cwd=tmp_path, prompt_file=tmp_path / "prompt.md",
+        schema_file=tmp_path / "schema.json", output_file=tmp_path / "provider.json",
+        sandbox="danger-full-access", delegation="allowed",
+    )
+    argv = CodexExecAdapter().build_argv(launch)
+    assert "--enable" not in argv
+    assert "--disable" not in argv
 
 
 def test_codex_fixture_normalizes_complete_lifecycle():
@@ -99,6 +221,35 @@ def test_claude_adapter_passes_configured_effort_and_schema_value(tmp_path: Path
     argv = ClaudePrintAdapter().build_argv(launch)
     assert argv[argv.index("--effort") + 1] == "high"
     assert argv[argv.index("--json-schema") + 1] == schema.read_text()
+    assert argv[argv.index("--disallowedTools") + 1] == "Agent"
+    assert "--safe-mode" not in argv
+
+
+def test_claude_allowed_delegation_does_not_disable_agent_tool(tmp_path: Path):
+    schema = tmp_path / "schema.json"
+    schema.write_text('{"type":"object"}')
+    launch = HarnessLaunch(
+        executable="claude", model="haiku", reasoning_effort="high", cwd=tmp_path,
+        prompt_file=tmp_path / "prompt", schema_file=schema,
+        output_file=tmp_path / "provider", sandbox="danger-full-access",
+        delegation="allowed",
+    )
+    assert "--disallowedTools" not in ClaudePrintAdapter().build_argv(launch)
+
+
+def test_claude_explicit_bundle_uses_safe_mode(tmp_path: Path):
+    schema = tmp_path / "schema.json"
+    schema.write_text('{"type":"object"}')
+    launch = HarnessLaunch(
+        executable="claude", model="haiku", reasoning_effort="high", cwd=tmp_path,
+        prompt_file=tmp_path / "prompt", schema_file=schema,
+        output_file=tmp_path / "provider", sandbox="danger-full-access",
+        instruction_policy="explicit_bundle",
+    )
+    argv = ClaudePrintAdapter().build_argv(launch)
+    assert "--safe-mode" in argv
+    assert "--disable-slash-commands" in argv
+    assert "--bare" not in argv
 
 
 def test_codex_success_requires_terminal_lifecycle_and_valid_result():

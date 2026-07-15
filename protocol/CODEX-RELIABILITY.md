@@ -17,13 +17,31 @@ Required invocation features are:
 - `--json` for stdout JSONL events;
 - `--output-schema` for the role result contract;
 - `--output-last-message` for an attempt-local provider output;
-- `--ignore-user-config` plus explicit run configuration;
+- `--ignore-user-config` plus explicit run configuration, which isolates only
+  `$CODEX_HOME/config.toml` and must not be treated as complete user-state isolation;
 - `--strict-config` to reject unsupported configured fields;
 - explicit model, cwd, sandbox, approval, and color settings.
 
-Authentication continues to use `CODEX_HOME`; configuration isolation must not copy or expose
-`auth.json`. If Orchestra supplies a writable isolated `CODEX_HOME`, authentication is mounted
-or delegated separately from configuration and attempt artifacts.
+The execution envelope preserves the operator's ordinary `HOME` so Git, package managers,
+project tools, and their credentials continue to work. It sets `CODEX_HOME` to an
+Orchestra-specific writable directory containing minimal generated automation configuration,
+session state, and harness-owned authentication. Personal `$HOME/.agents` is masked inside the
+transient systemd service so user skills cannot be discovered through the preserved home.
+
+Authentication is established separately in the dedicated `CODEX_HOME`; Orchestra never copies,
+symlinks, logs, or places `auth.json` in attempt artifacts. Setup and doctor commands report the
+state directory, executable version, authentication readiness, and instruction-file drift
+without printing credentials.
+
+Instruction transport uses `native_project`: Codex discovers repository `AGENTS.md` files once,
+while Orchestra records the resolved sources and hashes without appending them to stdin. A
+minimal automation-level `AGENTS.md` may live in the dedicated `CODEX_HOME`. Codex does not use
+`explicit_bundle` unless a supported CLI surface can disable all native instruction discovery;
+`--ignore-user-config` does not provide that guarantee.
+
+Delegation is role-owned and defaults to `disabled`. The adapter passes an explicit disabled
+`multi_agent` feature state for that policy, passes no override for `allowed`, and enables it
+only for `required`. Harness `extra_args` cannot override the role policy.
 
 ## Stream ownership
 
@@ -108,6 +126,15 @@ Before rollout, exercise the real dispatch and reconcile path for:
 8. same-thread resume with preserved worktree changes;
 9. retry exhaustion;
 10. `needs_human` with no retry.
+11. the exact transient-service envelope hides a matching personal instruction/skill sentinel
+    while the project sentinel is obeyed;
+12. delegation disabled exposes no collaboration events or tools;
+13. the attempt manifest records `native_project`, ordered instruction-source hashes,
+    delegation policy, execution-envelope fingerprint, and effective transmitted-prompt hash.
 
-After the adapter passes these canaries, rerun `ai-due-diligence#042`. The prompt instruction
-to poll yielded sessions remains defense in depth, not the control plane.
+The sentinel checks use launch, filesystem, init, and event evidence; a model statement that it
+did not load personal state is not proof. After the adapter passes these canaries through the
+same service path used by the scheduler, rerun a bounded real issue. The prompt instruction to
+poll yielded sessions remains defense in depth, not the control plane. Large multi-phase work
+such as the original `ai-due-diligence#042` is split into independently verifiable issues; this
+protocol does not add a checkpoint outcome.

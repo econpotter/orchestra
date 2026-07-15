@@ -64,6 +64,10 @@ class AttemptStore:
             "failure_evidence": "", "process_signal": None,
             "latest_event": "", "active_tool": "", "active_tool_started_at": "",
             "prompt_sha256": _sha(prompt), "instruction_sha256": _sha(instruction_bundle),
+            "effective_prompt_sha256": "", "instruction_policy": "",
+            "instruction_sources": [], "delegation_policy": "",
+            "execution_envelope_sha256": "", "supervisor_launch_sha256": "",
+            "harness_launch_sha256": "", "engine_provenance": {},
             "configuration_sha256": _sha(json.dumps(configuration, sort_keys=True)),
             "configuration": configuration,
             "artifacts": {

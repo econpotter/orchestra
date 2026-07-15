@@ -3,8 +3,9 @@
 ## Purpose
 
 Orchestra must run unattended coding workers reliably through interchangeable agent
-harnesses. Codex and Claude are the supported harnesses for the first implementation. Pi is
-represented in the contract so the core does not accidentally require Codex- or
+harnesses. Codex and Claude are implemented adapter targets for the first implementation, but
+an installation is not rollout-supported until its exact envelope passes the real canaries. Pi
+is represented in the contract so the core does not accidentally require Codex- or
 Claude-specific behavior, but a real Pi adapter is a later feature.
 
 A run must either complete with mutually consistent evidence or stop with an explicit,
@@ -40,6 +41,9 @@ model provider.
 9. A quiet active command is not a stall, and a yielded command is not a termination.
 10. Unknown optional event fields and event types are retained and ignored. Missing required
     lifecycle evidence fails loudly.
+11. A verifier `reject` is an ordinary review outcome, not an infrastructure failure.
+12. Instruction isolation is established from the execution envelope and observed harness
+    evidence, never from a model's claim about what it loaded.
 
 ## Components
 
@@ -87,7 +91,10 @@ Each attempt receives an immutable ID and directory. The durable manifest record
 - project, issue, role, harness, model, and harness version;
 - adapter version and declared capabilities;
 - parent attempt and session ID when resumed;
-- prompt, instruction-bundle, configuration, and result-schema fingerprints;
+- base prompt, effective transmitted prompt, instruction-bundle, configuration, and
+  result-schema fingerprints;
+- instruction policy, ordered source paths and per-source fingerprints, delegation policy,
+  and execution-envelope fingerprint;
 - worktree, branch, start commit, and observed terminal commit;
 - process ID, process start time, exit status or signal, and timestamps;
 - raw stdout event path, raw stderr path, provider-output path, and canonical-result path;
@@ -103,7 +110,7 @@ and retains all contradictory evidence.
 
 ## Capability contract
 
-Capabilities are data, not executable-name checks. Initial fields are:
+Capabilities are data, not executable-name checks. Harness protocol fields include:
 
 - `structured_events`;
 - `native_result_schema`;
@@ -111,8 +118,23 @@ Capabilities are data, not executable-name checks. Initial fields are:
 - `resume_session`;
 - `active_tool_events`;
 - `token_usage`;
-- `explicit_config_isolation`;
 - `graceful_cancel`.
+
+Isolation is not one boolean. Adapters declare each boundary independently:
+
+- `isolates_user_config`;
+- `isolates_user_instructions`;
+- `isolates_user_skills`;
+- `isolates_user_integrations`;
+- `isolates_session_state`;
+- `supports_dedicated_auth_home`.
+
+For example, ignoring a harness configuration file does not prove that global instructions,
+skills, plugins, MCP servers, or sessions are absent. An adapter must not advertise a broader
+capability than its launch envelope and a real sentinel canary demonstrate.
+Configured boundaries and verified capabilities are recorded separately. Isolation capabilities
+remain false until the exact installed-version transient-service sentinels have passed and the
+operator explicitly records those verified capability names in harness environment config.
 
 A role may declare required capabilities. Configuration validation rejects an incompatible
 harness before dispatch.
@@ -160,8 +182,8 @@ Worker, validator, and verifier schemas are versioned separately. Shared fields 
 - `schema_version`;
 - `outcome`;
 - `decisions`;
-- `failure_category` when unsuccessful;
-- `evidence` when unsuccessful;
+- `failure_category`;
+- `evidence`;
 - `requires_human`.
 
 Role-specific outcome enums remain narrow:
@@ -169,6 +191,14 @@ Role-specific outcome enums remain narrow:
 - worker: `committed`, `blocked`;
 - validator: `validated`, `blocked`;
 - verifier: `accept`, `reject`, `blocked`.
+
+All fields are present in every result. Only `blocked` may use a non-empty
+`failure_category`, and every `blocked` result must use a stable category. `committed`,
+`validated`, `accept`, and `reject` leave it empty. In particular, verifier `reject` carries
+actionable review findings in `decisions` and `evidence`; it transitions to rework without
+protocol recovery or another verifier attempt. Cross-field rules are enforced by Orchestra's
+semantic parser rather than advanced conditional JSON Schema features that are not portable
+across harness-native schema implementations.
 
 Codex and Claude receive the role schema through their native structured-output interfaces.
 Their adapters validate the returned object again. The future Pi adapter may validate a final
@@ -239,6 +269,11 @@ A running command is never "recovered" by launching a second process. The superv
 observing the original attempt. A resume reuses the same worktree, records a parent attempt,
 preserves partial changes, and tells the harness to inspect current state before acting.
 
+Resume is recovery from a terminal harness interruption, not an unbounded cognitive
+checkpoint protocol. There is no `checkpoint` role outcome or queue state. Oversized work is
+split into dependency-linked, independently verifiable issues; a checkpoint feature may be
+reconsidered only after evidence shows well-sized issues still exhaust context.
+
 When `hold_network_issues` is enabled, network-gated issues retain `held` and explicit
 release behavior. Recovery cannot bypass the configured gate.
 
@@ -258,24 +293,41 @@ Each may be disabled during development calibration, but unattended production c
 must declare a wall limit explicitly. When a threshold fires, the supervisor records its name,
 configured value, last event, active tool, and elapsed time before cancellation.
 
-## Deterministic configuration and instructions
+## Deterministic execution envelope and instructions
 
-Ambient global configuration and reproducible execution are competing goals. The default
-unattended policy is therefore `project_only`:
+Each adapter produces an explicit execution envelope containing environment additions and
+removals, harness state directory, filesystem masks and read-only paths, native instruction
+policy, integration policy, and delegation policy. The envelope preserves ordinary `HOME` so
+Git, package managers, project tools, and their credentials continue to work. Harness-specific
+state is isolated separately; changing `HOME` is not the default isolation mechanism.
 
-1. Orchestra resolves applicable repository-owned `AGENTS.md` and `CLAUDE.md` guidance.
-2. It creates one ordered instruction bundle and records its fingerprint.
-3. Harness-native ambient discovery is disabled where supported.
-4. The bundle is supplied explicitly through the adapter.
+Orchestra always resolves repository-owned instructions within the project/worktree boundary,
+records their deterministic order and per-source fingerprints, and retains the bundle as audit
+evidence. Transport is adapter-aware:
 
-Optional `native` and `explicit_files` policies may be configured, but the chosen policy and
-fingerprints are attempt evidence. Ambient global instructions are never silently part of a
-reproducible attempt.
+- `native_project`: the harness discovers project instructions natively. Orchestra does not
+  append the captured bundle to the prompt.
+- `explicit_bundle`: native instruction discovery is disabled and Orchestra supplies the
+  captured bundle exactly once.
+
+An adapter rejects a policy it cannot actually enforce. `ambient` may exist only as a visibly
+non-reproducible compatibility mode; it is never mislabeled isolated. A native structured
+result schema is passed through the harness interface and is not dumped into the user prompt.
+Only concise terminal-result semantics are generated into the role prompt.
+
+For Codex, the target envelope preserves `HOME`, uses a dedicated writable `CODEX_HOME`, and
+masks personal `$HOME/.agents` discovery inside the outer service boundary. Authentication is
+established in that dedicated harness home by an operator-facing setup flow and is never copied
+into attempt artifacts. Claude uses a dedicated writable `CLAUDE_CONFIG_DIR`, masks personal
+`$HOME/.claude`, disables slash skills and the delegation tool, and receives explicit bundled
+instructions under safe mode. Its authentication is established separately in that directory.
+Equivalent capabilities are not inferred merely because the adapter interface is shared.
 
 Harness configuration explicitly controls model, reasoning effort, cwd, tool set, MCP servers,
-sandbox/permission mode, color, event format, environment allowlist, and instruction policy.
-Authentication remains in the harness's supported credential store and is never copied into
-attempt artifacts.
+sandbox/permission mode, color, event format, environment allowlist, instruction policy, and
+delegation. Role-owned delegation policies are `disabled`, `allowed`, and `required`.
+Unattended roles default to `disabled`; adapters translate that policy into a deterministic
+harness feature/tool state. Raw extra arguments may not contradict the role policy.
 
 Outer and inner sandbox ownership is explicit. A harness may bypass its own sandbox only when
 Orchestra verifies that an external sandbox is active. Nested Bubblewrap failure is an
@@ -307,11 +359,20 @@ Development is TDD. Required layers are:
 3. supervisor tests for separate streams, atomic completion, process groups, and cancellation;
 4. truth-table tests covering every role and evidence combination;
 5. recovery-limit tests with preserved worktree changes;
-6. opt-in real Codex and Claude canaries through dispatch and reconciliation.
+6. opt-in real Codex and Claude canaries through the transient service, dispatch, and
+   reconciliation;
+7. personal-instruction and personal-skill sentinel canaries that inspect launch and event
+   evidence rather than trusting model self-report;
+8. a delegation-disabled canary with no collaboration tools or events, plus a long foreground
+   command canary proving shell continuation is not confused with subagent waiting.
 
 Mocked parser tests are necessary but insufficient. Completion requires observing the real
-installed harness path. A successful Claude canary is still outstanding because the fixture
-capture environment returned a structured HTTP 401 despite reporting a logged-in subscription.
+installed harness path inside the same transient service envelope used in operation. A real
+Claude worker and verifier completed through the transient service with native structured
+output; the older HTTP 401 fixture remains valuable contradictory-evidence coverage. That
+lifecycle canary preceded the dedicated `CLAUDE_CONFIG_DIR` envelope. A later init probe showed
+personal plugins disappear under the dedicated directory, but authentication was absent there.
+The current Claude isolation envelope therefore remains unverified.
 
 ## Delivery plan
 
@@ -341,10 +402,21 @@ capture environment returned a structured HTTP 401 despite reporting a logged-in
 - Add bounded same-session resume.
 - Exercise failure and recovery through real canaries.
 
-### Increment 4: rollout
+### Increment 4: execution-envelope reliability
+
+- Replace coarse configuration isolation with decomposed demonstrated capabilities.
+- Add adapter-aware `native_project` and `explicit_bundle` instruction delivery.
+- Preserve `HOME`, isolate harness state, and mask personal discovery paths.
+- Make delegation role-owned and disabled by default.
+- Record effective prompt, instruction-source, delegation, and envelope fingerprints.
+- Record the loaded Orchestra package fingerprint and expose comparison against the checkout
+  that passed rollout gates.
+
+### Increment 5: rollout
 
 - Run one bounded issue through Codex and one through Claude.
-- Rerun the `ai-due-diligence#042` workload through Codex.
+- Split multi-phase workloads such as the original `ai-due-diligence#042` into bounded,
+  dependency-linked issues before rerunning them.
 - Remove prose-log failure classification only after structured adapters cover active roles.
 
 ### Later feature: Pi
@@ -367,3 +439,6 @@ The feature is complete when:
 - human and acceptance failures never retry automatically;
 - incompatible harness capabilities fail before dispatch;
 - real Codex and Claude dispatch-to-reconcile canaries pass.
+- instruction and skill sentinels prove that personal automation state is absent;
+- delegation-disabled and long-command service canaries pass;
+- the installed runtime provenance matches the engine commit that passed those gates.

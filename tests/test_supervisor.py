@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from orchestra.attempt import AttemptStore
 from orchestra.harness import CodexExecAdapter, role_schema
-from orchestra.supervisor import run_attempt
+from orchestra.supervisor import compose_harness_prompt, run_attempt
 
 
 FAKE = Path(__file__).parent / "fake_structured_harness.py"
@@ -19,6 +21,7 @@ def _attempt(tmp_path: Path):
         configuration={
             "executable": str(FAKE), "reasoning_effort": "high",
             "sandbox": "danger-full-access", "extra_args": [],
+            "instruction_policy": "explicit_bundle",
             "limits": {"wall_seconds": 0, "idle_seconds": 0,
                        "active_tool_seconds": 0, "grace_seconds": 1},
         },
@@ -26,6 +29,41 @@ def _attempt(tmp_path: Path):
     )
     attempt.schema_path.write_text(json.dumps(role_schema("worker")))
     return store, attempt
+
+
+def test_native_project_prompt_excludes_instruction_bundle_and_schema_dump():
+    prompt = compose_harness_prompt(
+        "do it", "PROJECT SENTINEL", "native_project", "verifier"
+    )
+    assert "PROJECT SENTINEL" not in prompt
+    assert '"schema_version"' not in prompt
+    assert prompt.count("Valid verifier outcomes: accept, reject, blocked.") == 1
+
+
+def test_explicit_bundle_prompt_includes_instructions_and_contract_exactly_once():
+    prompt = compose_harness_prompt(
+        "do it", "PROJECT SENTINEL", "explicit_bundle", "worker"
+    )
+    assert prompt.count("PROJECT SENTINEL") == 1
+    assert prompt.count("Valid worker outcomes: committed, blocked.") == 1
+    assert '"properties"' not in prompt
+
+
+def test_prompt_composition_rejects_unknown_instruction_policy():
+    with pytest.raises(ValueError, match="unknown instruction policy"):
+        compose_harness_prompt("do it", "rules", "ambient", "worker")
+
+
+def test_preflight_authentication_failure_keeps_specific_category(tmp_path: Path):
+    store, attempt = _attempt(tmp_path)
+    store.update(
+        attempt,
+        preflight_error="isolated Codex is not authenticated",
+        preflight_error_category="authentication_failure",
+    )
+    assert run_attempt(attempt.path) == 0
+    loaded = store.load("a1")
+    assert loaded.data["failure_category"] == "authentication_failure"
 
 
 def test_supervisor_separates_streams_and_writes_canonical_result(tmp_path: Path):
@@ -42,6 +80,7 @@ def test_supervisor_separates_streams_and_writes_canonical_result(tmp_path: Path
     assert result["outcome"] == "committed"
     assert loaded.data["session_id"] == "fake-thread"
     assert loaded.data["harness_version"] == "codex-cli 1.2.3"
+    assert len(loaded.data["harness_launch_sha256"]) == 64
     assert json.loads(loaded.process_path.read_text())["process_exit"] == 0
 
 

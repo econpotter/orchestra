@@ -1,9 +1,12 @@
 slots: 2
 roles:
-  validator: {harness: codex, model: gpt-5.4-mini, prompt: prompts/validator.md}
+  validator: {harness: codex, model: gpt-5.4-mini, prompt: prompts/validator.md,
+              instruction_policy: native_project, delegation: disabled}
   worker: {harness: codex, model: gpt-5.4, prompt: prompts/worker.md,
+           instruction_policy: native_project, delegation: disabled,
            required_capabilities: [structured_events, native_result_schema, resume_session]}
-  verifier: {harness: codex, model: gpt-5.4, prompt: prompts/verify-review.md}
+  verifier: {harness: codex, model: gpt-5.4, prompt: prompts/verify-review.md,
+             instruction_policy: native_project, delegation: disabled}
 validate: {semantic: false}
 retries_cap: 2
 # Network access is ordinary by default. Set this true only when every issue marked
@@ -15,7 +18,13 @@ harnesses:
     executable: codex
     reasoning_effort: high
     sandbox: danger-full-access
-    extra_args: ["--skip-git-repo-check", "--enable", "multi_agent"]
+    environment: {policy: isolated, state_dir: .orchestra/homes/codex}
+    # Optional: install a minimal global automation contract into isolated CODEX_HOME.
+    # environment: {policy: isolated, state_dir: .orchestra/homes/codex,
+    #               instructions_file: automation/AGENTS.md}
+    # Record verified_capabilities only after this installed version and the exact service
+    # envelope pass the documented sentinels; configured isolation alone is not evidence.
+    extra_args: ["--skip-git-repo-check"]
     attempts_cap: 3
     limits: {wall_seconds: 14400, idle_seconds: 900, active_tool_seconds: 7200, grace_seconds: 20}
   claude:
@@ -23,8 +32,10 @@ harnesses:
     executable: claude
     reasoning_effort: high
     sandbox: danger-full-access
+    environment: {policy: isolated, state_dir: .orchestra/homes/claude}
     attempts_cap: 3
     limits: {wall_seconds: 14400, idle_seconds: 900, active_tool_seconds: 7200, grace_seconds: 20}
+# Pi remains an adapter protocol sketch; no Pi harness is configured until it is implemented.
 sandbox: {enabled: true, kind: systemd, executable: systemd-run}
 workflows:
   python:

@@ -13,17 +13,20 @@ Prior verifier feedback (act on it if non-empty): {verifier_feedback}
 If a Plan/Spec path is given, read it for detail. If both are empty, implement from the
 title + acceptance above.
 
-## First, read the project's lifecycle policy
-Read the project's `AGENTS.md`. It states the **lifecycle stage** — follow it exactly:
+## Follow the loaded project instructions
+The loaded project instructions (commonly `AGENTS.md`) state the **lifecycle stage** — follow
+them exactly; do not read or inject the file a second time:
 - development: prefer a clean rewrite; no backward-compat obligations.
 - production: preserve backward compatibility; defer features rather than break interfaces.
 If unstated, treat the project as development.
 
-## Implement as a converging lead
-For multi-step work, decompose the task. When your harness exposes in-run subagents or task
-delegation, use them for independent investigation, implementation, and review steps. Then
-run a fresh adversarial self-review against every acceptance criterion. Iterate implement ->
-review -> fix until the review finds nothing material.
+## Implement and review
+For multi-step work, decompose the task, then run a fresh adversarial self-review against
+every acceptance criterion. Iterate implement -> review -> fix until the review finds
+nothing material.
+
+Do not infer permission to use subagents from harness availability. Orchestra configures
+delegation separately for the role.
 
 Satisfy every acceptance criterion, match the surrounding code's style, and stay strictly
 in scope: do only this issue.

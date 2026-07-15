@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
+import shutil
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -10,9 +14,12 @@ from pathlib import Path
 
 from orchestra import git_ops, layout
 from orchestra.archive import merge_and_archive
+from orchestra.attempt import AttemptStore
 from orchestra.config import load_config
 from orchestra.dashboard import summarize
 from orchestra.dispatch import dispatch as _dispatch
+from orchestra.envelope import build_execution_envelope
+from orchestra.harness import adapter_for, preflight_harness
 from orchestra.issue import (
     AcceptanceItem,
     Issue,
@@ -22,6 +29,8 @@ from orchestra.issue import (
     exception_detail,
 )
 from orchestra.projects import find_project, read_projects
+from orchestra.prompting import resolve_configured_instruction
+from orchestra.provenance import package_tree_digest, runtime_provenance
 from orchestra.queue import find_issue, read_queue, write_queue
 from orchestra.reconcile import reconcile as _reconcile
 from orchestra.registry import issue_key, load_registry
@@ -59,6 +68,212 @@ def cmd_workspace_set(args: argparse.Namespace) -> int:
     except WorkspaceError as exc:
         print(f"workspace error: {exc}", file=sys.stderr)
         return 2
+
+
+def _isolated_harness(root: Path, name: str):
+    config = load_config(root / "config.yaml")
+    harness = config.harnesses.get(name)
+    if harness is None:
+        print(f"harness {name!r} is not configured", file=sys.stderr)
+        return None
+    if harness.kind not in {"codex", "claude"} or harness.environment.policy != "isolated":
+        print(
+            f"harness {name!r} setup/doctor requires isolated Codex or Claude",
+            file=sys.stderr,
+        )
+        return None
+    adapter = adapter_for(harness.kind)
+    envelope = build_execution_envelope(
+        root, name, harness, adapter.capabilities, home=Path.home(),
+        instruction_policy="explicit_bundle" if harness.kind == "claude" else "native_project",
+    )
+    return harness, envelope
+
+
+def cmd_harness_setup(args: argparse.Namespace) -> int:
+    resolved = _isolated_harness(Path(args.root), args.name)
+    if resolved is None:
+        return 2
+    harness, envelope = resolved
+    variable = "CODEX_HOME" if harness.kind == "codex" else "CLAUDE_CONFIG_DIR"
+    state_dir = Path(dict(envelope.environment)[variable])
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        state_dir.chmod(0o700)
+        if harness.kind == "codex" and harness.environment.instructions_file:
+            override = state_dir / "AGENTS.override.md"
+            if override.exists():
+                print(
+                    f"refusing setup: {override} would shadow configured automation "
+                    "instructions; remove it explicitly",
+                    file=sys.stderr,
+                )
+                return 1
+            instructions, _source = resolve_configured_instruction(
+                Path(args.root), harness.environment.instructions_file
+            )
+            target = state_dir / "AGENTS.md"
+            temporary = state_dir / ".AGENTS.md.tmp"
+            temporary.write_text(instructions)
+            temporary.chmod(0o600)
+            os.replace(temporary, target)
+    except OSError as exc:
+        print(f"could not prepare isolated {harness.kind} state directory: {exc}", file=sys.stderr)
+        return 1
+    login_argv = "login" if harness.kind == "codex" else "auth login"
+    print(
+        f"{variable}={shlex.quote(str(state_dir))} "
+        f"{shlex.quote(harness.executable)} {login_argv}"
+    )
+    return 0
+
+
+def cmd_harness_doctor(args: argparse.Namespace) -> int:
+    resolved = _isolated_harness(Path(args.root), args.name)
+    if resolved is None:
+        return 2
+    harness, envelope = resolved
+    variable = "CODEX_HOME" if harness.kind == "codex" else "CLAUDE_CONFIG_DIR"
+    state_dir = Path(dict(envelope.environment)[variable])
+    state_dir_exists = state_dir.is_dir()
+    state_dir_writable = state_dir_exists and os.access(state_dir, os.W_OK)
+    state_dir_private = state_dir_exists and stat.S_IMODE(state_dir.stat().st_mode) == 0o700
+    executable = shutil.which(harness.executable) or ""
+    version = ""
+    preflight = "failed"
+    try:
+        version = preflight_harness(harness.kind, harness.executable)
+        preflight = "passed"
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        pass
+
+    login = "not_checked"
+    if state_dir_exists and state_dir_writable and executable and preflight == "passed":
+        environment = os.environ.copy()
+        environment.update(dict(envelope.environment))
+        try:
+            login_command = (
+                [harness.executable, "login", "status"] if harness.kind == "codex"
+                else [harness.executable, "auth", "status", "--json"]
+            )
+            result = subprocess.run(
+                login_command,
+                text=True,
+                capture_output=True,
+                timeout=15,
+                check=False,
+                env=environment,
+            )
+            login = "authenticated" if result.returncode == 0 else "not_authenticated"
+        except (OSError, subprocess.SubprocessError):
+            login = "not_authenticated"
+
+    instructions = "not_configured"
+    if harness.kind == "codex" and harness.environment.instructions_file:
+        target = state_dir / "AGENTS.md"
+        if (state_dir / "AGENTS.override.md").exists():
+            instructions = "shadowed_by_override"
+        elif not target.is_file():
+            instructions = "missing"
+        else:
+            try:
+                expected, _source = resolve_configured_instruction(
+                    Path(args.root), harness.environment.instructions_file
+                )
+                instructions = "current" if target.read_text() == expected else "drifted"
+            except OSError:
+                instructions = "source_unavailable"
+
+    ready = all((state_dir_exists, state_dir_writable, executable, preflight == "passed",
+                 state_dir_private, login == "authenticated",
+                 instructions in {"not_configured", "current"}))
+    report = {
+        "name": args.name,
+        "kind": harness.kind,
+        "policy": harness.environment.policy,
+        "state_dir": str(state_dir),
+        "state_dir_exists": state_dir_exists,
+        "state_dir_writable": state_dir_writable,
+        "state_dir_private": state_dir_private,
+        "executable": executable,
+        "version": version,
+        "preflight": preflight,
+        "login": login,
+        "instructions": instructions,
+        "ready": ready,
+    }
+    if args.json:
+        print(json.dumps(report, sort_keys=True))
+    else:
+        for key, value in report.items():
+            print(f"{key}: {value}")
+    return 0 if ready else 1
+
+
+def cmd_engine_provenance(args: argparse.Namespace) -> int:
+    report = runtime_provenance()
+    result = 0
+    if args.compare:
+        candidate = Path(args.compare).resolve()
+        comparison_root = candidate / "src" / "orchestra"
+        if not comparison_root.is_dir():
+            comparison_root = candidate
+        report["comparison_root"] = str(comparison_root)
+        report["comparison_sha256"] = package_tree_digest(comparison_root)
+        report["matches"] = report["package_sha256"] == report["comparison_sha256"]
+        result = 0 if report["matches"] else 1
+    if args.json:
+        print(json.dumps(report, sort_keys=True))
+    else:
+        for key, value in report.items():
+            print(f"{key}: {value}")
+    return result
+
+
+def cmd_attempt_explain(args: argparse.Namespace) -> int:
+    if Path(args.attempt_id).name != args.attempt_id:
+        print("attempt ID must not contain a path", file=sys.stderr)
+        return 2
+    try:
+        attempt = AttemptStore(Path(args.root)).load(args.attempt_id)
+    except (FileNotFoundError, json.JSONDecodeError):
+        print(f"attempt {args.attempt_id!r} was not found", file=sys.stderr)
+        return 2
+    data = attempt.data
+    artifact_paths = {
+        "manifest": attempt.path,
+        "prompt": attempt.prompt_path,
+        "instructions": attempt.instructions_path,
+        "stdout": attempt.stdout_path,
+        "stderr": attempt.stderr_path,
+        "provider_output": attempt.provider_output_path,
+        "canonical_result": attempt.canonical_result_path,
+        "process": attempt.process_path,
+    }
+    report = {
+        key: data.get(key) for key in (
+            "attempt_id", "project", "number", "role", "harness", "model", "state",
+            "terminal_outcome", "failure_category", "failure_evidence", "process_exit",
+            "session_id", "start_commit", "terminal_commit", "parent_attempt",
+            "instruction_policy", "instruction_sources", "delegation_policy",
+            "execution_envelope_sha256", "supervisor_launch_sha256",
+            "harness_launch_sha256", "effective_prompt_sha256", "engine_provenance",
+            "harness_version", "harness_executable", "preflight",
+        )
+    }
+    report["artifacts"] = {
+        name: {
+            "path": str(path), "exists": path.is_file(),
+            "bytes": path.stat().st_size if path.is_file() else 0,
+        }
+        for name, path in artifact_paths.items()
+    }
+    if args.json:
+        print(json.dumps(report, sort_keys=True))
+    else:
+        for key, value in report.items():
+            print(f"{key}: {json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else value}")
+    return 0
 
 
 def _all_issues(root: Path):
@@ -566,6 +781,38 @@ def build_parser() -> argparse.ArgumentParser:
     p_workspace_set.add_argument("path")
     p_workspace_set.set_defaults(func=cmd_workspace_set)
 
+    p_harness = sub.add_parser("harness", help="configure and diagnose agent harnesses")
+    harness_sub = p_harness.add_subparsers(dest="harness_command", required=True)
+    p_harness_setup = harness_sub.add_parser(
+        "setup", help="prepare an isolated harness state directory"
+    )
+    p_harness_setup.add_argument("name")
+    p_harness_setup.set_defaults(func=cmd_harness_setup)
+    p_harness_doctor = harness_sub.add_parser(
+        "doctor", help="report harness executable, state, preflight, and authentication health"
+    )
+    p_harness_doctor.add_argument("name")
+    p_harness_doctor.add_argument("--json", action="store_true")
+    p_harness_doctor.set_defaults(func=cmd_harness_doctor)
+
+    p_engine = sub.add_parser("engine", help="diagnose the installed Orchestra engine")
+    engine_sub = p_engine.add_subparsers(dest="engine_command", required=True)
+    p_engine_provenance = engine_sub.add_parser(
+        "provenance", help="fingerprint the loaded package and compare it with a checkout"
+    )
+    p_engine_provenance.add_argument("--compare", default=None)
+    p_engine_provenance.add_argument("--json", action="store_true")
+    p_engine_provenance.set_defaults(func=cmd_engine_provenance)
+
+    p_attempt = sub.add_parser("attempt", help="inspect durable harness attempt evidence")
+    attempt_sub = p_attempt.add_subparsers(dest="attempt_command", required=True)
+    p_attempt_explain = attempt_sub.add_parser(
+        "explain", help="summarize one attempt's outcome, provenance, and artifacts"
+    )
+    p_attempt_explain.add_argument("attempt_id")
+    p_attempt_explain.add_argument("--json", action="store_true")
+    p_attempt_explain.set_defaults(func=cmd_attempt_explain)
+
     p_status = sub.add_parser("status", help="engine dashboard")
     p_status.add_argument("--json", action="store_true")
     p_status.set_defaults(func=cmd_status)
@@ -694,7 +941,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     args = build_parser().parse_args(_hoist_root(argv))
-    if args.command not in {"guide", "workspace"}:
+    if args.command not in {"engine", "guide", "workspace"}:
         try:
             args.root = str(resolve_workspace(args.root))
         except WorkspaceError as exc:

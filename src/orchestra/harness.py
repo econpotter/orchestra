@@ -56,6 +56,8 @@ class HarnessLaunch:
     sandbox: str
     extra_args: tuple[str, ...] = ()
     resume_session: str = ""
+    instruction_policy: str = "native_project"
+    delegation: str = "disabled"
 
 
 def role_schema(role: str) -> dict[str, Any]:
@@ -79,6 +81,18 @@ def role_schema(role: str) -> dict[str, Any]:
     }
 
 
+def role_contract_instruction(role: str) -> str:
+    """Describe the semantic result contract from the same outcome registry as the schema."""
+    if role not in ROLE_OUTCOMES:
+        raise ValueError(f"unknown role: {role}")
+    outcomes = ", ".join(ROLE_OUTCOMES[role])
+    return (
+        f"Valid {role} outcomes: {outcomes}. "
+        "Only blocked outcomes may set failure_category, and blocked outcomes must use "
+        "a stable failure_category; every other outcome must leave failure_category empty."
+    )
+
+
 def parse_role_result(role: str, data: object) -> RoleResult:
     if role not in ROLE_OUTCOMES or not isinstance(data, dict):
         raise ValueError("role result must be an object for a known role")
@@ -94,11 +108,11 @@ def parse_role_result(role: str, data: object) -> RoleResult:
         raise ValueError("role result string fields must be strings")
     if not isinstance(data["requires_human"], bool):
         raise ValueError("requires_human must be a boolean")
-    success = data["outcome"] in {"committed", "validated", "accept", "reject"}
-    if success and data["failure_category"]:
-        raise ValueError("successful outcome cannot have failure_category")
-    if not success and data["failure_category"] not in FAILURE_CATEGORIES:
-        raise ValueError("unsuccessful outcome requires a stable failure_category")
+    blocked = data["outcome"] == "blocked"
+    if not blocked and data["failure_category"]:
+        raise ValueError("non-blocked outcome requires empty failure_category")
+    if blocked and data["failure_category"] not in FAILURE_CATEGORIES:
+        raise ValueError("blocked outcome requires a stable failure_category")
     if data["failure_category"] in {"needs_human", "acceptance_failure"} \
             and not data["requires_human"]:
         raise ValueError("human/acceptance failures must require human review")
@@ -120,10 +134,17 @@ class CodexExecAdapter:
     capabilities = {
         "structured_events": True, "native_result_schema": True,
         "durable_session": True, "resume_session": True, "active_tool_events": True,
-        "token_usage": True, "explicit_config_isolation": True, "graceful_cancel": True,
+        "token_usage": True, "graceful_cancel": True,
     }
 
     def build_argv(self, launch: HarnessLaunch) -> list[str]:
+        delegation_args = {
+            "disabled": ["--disable", "multi_agent"],
+            "allowed": [],
+            "required": ["--enable", "multi_agent"],
+        }.get(launch.delegation)
+        if delegation_args is None:
+            raise ValueError(f"unsupported delegation policy: {launch.delegation}")
         base = [launch.executable, "exec"]
         if launch.resume_session:
             base += ["resume", "--json", "--ignore-user-config", "--strict-config",
@@ -134,7 +155,7 @@ class CodexExecAdapter:
                 "--output-schema", str(launch.schema_file),
                 "--output-last-message", str(launch.output_file),
                 "--config", f'model_reasoning_effort="{launch.reasoning_effort}"',
-                *launch.extra_args, launch.resume_session, "-",
+                *delegation_args, *launch.extra_args, launch.resume_session, "-",
             ]
             return base
         base += [
@@ -143,7 +164,7 @@ class CodexExecAdapter:
             "--output-schema", str(launch.schema_file),
             "--output-last-message", str(launch.output_file),
             "--config", f'model_reasoning_effort="{launch.reasoning_effort}"',
-            *launch.extra_args, "-",
+            *delegation_args, *launch.extra_args, "-",
         ]
         return base
 
@@ -188,9 +209,17 @@ class CodexExecAdapter:
 
 class ClaudePrintAdapter:
     name = "claude"
-    capabilities = dict(CodexExecAdapter.capabilities)
+    capabilities = {
+        "structured_events": True, "native_result_schema": True,
+        "durable_session": True, "resume_session": True, "active_tool_events": True,
+        "token_usage": True, "graceful_cancel": True,
+    }
 
     def build_argv(self, launch: HarnessLaunch) -> list[str]:
+        if launch.delegation == "required":
+            raise ValueError("Claude does not support required delegation")
+        if launch.delegation not in {"disabled", "allowed"}:
+            raise ValueError(f"unsupported delegation policy: {launch.delegation}")
         argv = [launch.executable, "-p"]
         if launch.resume_session:
             argv += ["--resume", launch.resume_session]
@@ -202,6 +231,10 @@ class ClaudePrintAdapter:
                                   else "acceptEdits"),
             "--setting-sources", "project,local", *launch.extra_args,
         ]
+        if launch.delegation == "disabled":
+            argv += ["--disallowedTools", "Agent"]
+        if launch.instruction_policy == "explicit_bundle":
+            argv += ["--safe-mode", "--disable-slash-commands"]
         return argv
 
     def normalize(self, raw: dict[str, Any]) -> list[NormalizedEvent]:
@@ -285,7 +318,8 @@ def preflight_harness(kind: str, executable: str) -> str:
         "codex": ("--json", "--output-schema", "--output-last-message",
                   "--ignore-user-config", "--strict-config", "--sandbox"),
         "claude": ("--output-format", "--json-schema", "--setting-sources",
-                   "--resume", "--permission-mode"),
+                   "--resume", "--permission-mode", "--safe-mode", "--disallowedTools",
+                   "--disable-slash-commands"),
     }[kind]
     help_result = subprocess.run(
         [resolved, "exec", "--help"] if kind == "codex" else [resolved, "--help"],
@@ -315,3 +349,21 @@ def preflight_harness(kind: str, executable: str) -> str:
     if version_result.returncode:
         raise RuntimeError(f"{kind} harness version check failed: {version_result.stderr.strip()}")
     return (version_result.stdout or version_result.stderr).strip()
+
+
+def preflight_authentication(
+    kind: str, executable: str, environment: dict[str, str]
+) -> None:
+    """Verify non-interactive authentication where a harness exposes a safe status command."""
+    command = {
+        "codex": [executable, "login", "status"],
+        "claude": [executable, "auth", "status", "--json"],
+    }.get(kind)
+    if command is None:
+        return
+    result = subprocess.run(
+        command, text=True, capture_output=True,
+        timeout=15, check=False, env=environment,
+    )
+    if result.returncode:
+        raise RuntimeError(f"{kind} authentication preflight failed in isolated harness home")

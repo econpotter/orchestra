@@ -157,6 +157,52 @@ def test_dispatch_records_project_ro_seeds_in_attempt(tmp_path: Path):
     _wait_all_dead(tmp_path)
 
 
+def test_dispatch_records_instruction_provenance_and_isolated_service_envelope(
+    tmp_path: Path,
+):
+    _setup(tmp_path, _issue(4, "validated"))
+    repo = tmp_path / "projects" / "wf"
+    (repo / "AGENTS.md").write_text("project-only\n")
+    _git(repo, "add", "AGENTS.md")
+    _git(repo, "commit", "-m", "instructions")
+    cfg = load_config(tmp_path / "config.yaml")
+    cfg.harnesses["fake"].environment.policy = "isolated"
+    cfg.harnesses["fake"].environment.verified_capabilities = (
+        "isolates_user_skills",
+    )
+
+    dispatch(tmp_path, cfg, started="2026-06-26T00:00:00Z")
+
+    handle = load_registry(tmp_path / ".orchestra" / "workers.json")[issue_key("wf", 4)]
+    manifest = json.loads(Path(handle.manifest).read_text())
+    assert manifest["instruction_policy"] == "native_project"
+    assert manifest["instruction_sources"][0]["path"] == "AGENTS.md"
+    assert len(manifest["execution_envelope_sha256"]) == 64
+    assert len(manifest["engine_provenance"]["package_sha256"]) == 64
+    assert manifest["delegation_policy"] == "disabled"
+    assert manifest["capabilities"]["isolates_user_skills"] is True
+    assert "isolates_user_skills" not in manifest["supported_capabilities"]
+
+    from orchestra.attempt import AttemptStore
+    from orchestra.dispatch import _supervisor_service_argv
+
+    attempt = AttemptStore(tmp_path).load(handle.attempt_id)
+    argv = _supervisor_service_argv(tmp_path, attempt, cfg)
+    assert f"--setenv=CODEX_HOME={tmp_path / '.orchestra' / 'homes' / 'fake'}" in argv
+    assert f"InaccessiblePaths=-{Path.home() / '.agents'}" in argv
+    assert f"ReadWritePaths={tmp_path / '.orchestra' / 'homes' / 'fake'}" in argv
+    _wait_all_dead(tmp_path)
+
+
+def test_launch_fingerprint_covers_full_argv():
+    from orchestra.dispatch import _launch_fingerprint
+
+    first = _launch_fingerprint(["systemd-run", "--property", "ProtectHome=read-only"])
+    second = _launch_fingerprint(["systemd-run", "--property", "ProtectHome=no"])
+    assert len(first) == 64
+    assert first != second
+
+
 def test_dispatch_respects_slots(tmp_path: Path):
     _setup(tmp_path, _issue(1, "open") + "\n" + _issue(2, "open") + "\n" + _issue(3, "open"))
     cfg = load_config(tmp_path / "config.yaml")

@@ -93,6 +93,17 @@ def test_worker_self_reported_block_never_claims_success(tmp_path: Path, monkeyp
     assert manifest["retry_disposition"] == "blocked"
 
 
+def test_verifier_reject_advances_once_to_needs_rework(tmp_path: Path, monkeypatch):
+    _setup(tmp_path, status="committed")
+    status, manifest = _run(tmp_path, monkeypatch, "reject")
+    issue = find_issue(read_queue(tmp_path / "queue" / "wf.md"), 1)
+    assert status == "needs_rework"
+    assert issue.retries == 1
+    assert issue.verifier_feedback == "retry: fake complaint"
+    assert manifest["retry_disposition"] == "reject"
+    assert manifest["failure_category"] == ""
+
+
 def test_structured_quota_failure_resumes_same_session_with_bound(tmp_path: Path, monkeypatch):
     _setup(tmp_path, network=True)
     status, manifest = _run(tmp_path, monkeypatch, "session_limit")

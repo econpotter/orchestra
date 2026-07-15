@@ -1,6 +1,17 @@
 from pathlib import Path
 
-from orchestra.prompting import render, render_file, render_prompt
+import hashlib
+import pytest
+
+from orchestra.prompting import (
+    InstructionBundle,
+    InstructionSource,
+    render,
+    render_file,
+    render_prompt,
+    resolve_instruction_bundle,
+    resolve_instruction_provenance,
+)
 
 
 def test_render_substitutes_known_keys():
@@ -39,13 +50,94 @@ def test_worker_prompt_requires_polling_yielded_commands():
     assert "does not mean the process was terminated" in prompt
 
 
-def test_instruction_bundle_captures_boundary_and_project_without_duplicate_symlink(tmp_path):
-    from orchestra.prompting import resolve_instruction_bundle
-    (tmp_path / "AGENTS.md").write_text("global rules")
+def test_instruction_bundle_stops_at_worktree_boundary(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("workspace rules")
     worktree = tmp_path / ".orchestra" / "worktrees" / "p-001"
     worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: /tmp/common/worktrees/p-001\n")
     (worktree / "AGENTS.md").write_text("project rules")
+
     (worktree / "CLAUDE.md").symlink_to(worktree / "AGENTS.md")
     bundle = resolve_instruction_bundle(worktree, boundary=tmp_path)
-    assert "global rules" in bundle
+
+    assert "workspace rules" not in bundle
     assert bundle.count("project rules") == 1
+
+
+def test_instruction_provenance_records_immutable_sources_and_hashes(tmp_path):
+    (tmp_path / ".git").mkdir()
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("project rules\n")
+
+    bundle = resolve_instruction_provenance(tmp_path, boundary=tmp_path)
+
+    assert isinstance(bundle, InstructionBundle)
+    assert bundle.sources == (
+        InstructionSource(
+            path="AGENTS.md",
+            sha256=hashlib.sha256(agents.read_bytes()).hexdigest(),
+        ),
+    )
+    assert bundle.text == "# AGENTS.md\n\nproject rules\n"
+
+
+def test_instruction_provenance_orders_ancestors_then_names_deterministically(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "CLAUDE.md").write_text("root claude")
+    (tmp_path / "AGENTS.md").write_text("root agents")
+    nested = tmp_path / "src" / "feature"
+    nested.mkdir(parents=True)
+    (nested / "CLAUDE.md").write_text("nested claude")
+    (nested / "AGENTS.md").write_text("nested agents")
+
+    first = resolve_instruction_provenance(nested, boundary=tmp_path)
+    second = resolve_instruction_provenance(nested, boundary=tmp_path)
+
+    assert first == second
+    assert [source.path for source in first.sources] == [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "src/feature/AGENTS.md",
+        "src/feature/CLAUDE.md",
+    ]
+
+
+def test_instruction_provenance_deduplicates_symlinked_agent_files(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text("same rules")
+    (tmp_path / "CLAUDE.md").symlink_to(tmp_path / "AGENTS.md")
+
+    bundle = resolve_instruction_provenance(tmp_path, boundary=tmp_path)
+
+    assert [source.path for source in bundle.sources] == ["AGENTS.md"]
+    assert bundle.text.count("same rules") == 1
+
+
+def test_codex_instruction_provenance_uses_override_precedence_and_ignores_claude(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text("base rules")
+    (tmp_path / "AGENTS.override.md").write_text("override rules")
+    (tmp_path / "CLAUDE.md").write_text("claude-only rules")
+    nested = tmp_path / "src"
+    nested.mkdir()
+    (nested / "AGENTS.override.md").write_text("")
+    (nested / "AGENTS.md").write_text("nested rules")
+
+    bundle = resolve_instruction_provenance(
+        nested, boundary=tmp_path, harness_kind="codex"
+    )
+
+    assert [source.path for source in bundle.sources] == [
+        "AGENTS.override.md", "src/AGENTS.md",
+    ]
+    assert "override rules" in bundle.text
+    assert "base rules" not in bundle.text
+    assert "claude-only rules" not in bundle.text
+
+
+def test_codex_instruction_provenance_fails_loud_at_default_size_limit(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text("x" * 32769)
+
+    with pytest.raises(ValueError, match="32768-byte"):
+        resolve_instruction_provenance(tmp_path, boundary=tmp_path, harness_kind="codex")

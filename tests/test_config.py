@@ -99,6 +99,58 @@ def test_harness_limits_are_configurable(tmp_path):
     assert load_config(p).harnesses["c"].limits.wall_seconds == 99
 
 
+def test_role_and_harness_environment_policies_are_configurable(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "slots: 1\n"
+        "roles:\n"
+        "  worker:\n"
+        "    harness: c\n"
+        "    model: m\n"
+        "    prompt: prompts/worker.md\n"
+        "    instruction_policy: explicit_bundle\n"
+        "    delegation: required\n"
+        "harnesses:\n"
+        "  c:\n"
+        "    kind: codex\n"
+        "    executable: codex\n"
+        "    environment: {policy: isolated, state_dir: .orchestra/homes/codex, "
+        "instructions_file: automation/AGENTS.md, "
+        "verified_capabilities: [isolates_user_skills]}\n"
+    )
+
+    cfg = load_config(p)
+
+    assert cfg.roles["worker"].instruction_policy == "explicit_bundle"
+    assert cfg.roles["worker"].delegation == "required"
+    assert cfg.harnesses["c"].environment.policy == "isolated"
+    assert cfg.harnesses["c"].environment.state_dir == ".orchestra/homes/codex"
+    assert cfg.harnesses["c"].environment.instructions_file == "automation/AGENTS.md"
+    assert cfg.harnesses["c"].environment.verified_capabilities == (
+        "isolates_user_skills",
+    )
+
+
+def test_role_and_harness_environment_policies_have_safe_defaults(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "slots: 1\n"
+        "roles:\n"
+        "  worker: {harness: c, model: m, prompt: prompts/worker.md}\n"
+        "harnesses:\n"
+        "  c: {kind: codex, executable: codex}\n"
+    )
+
+    cfg = load_config(p)
+
+    assert cfg.roles["worker"].instruction_policy == "native_project"
+    assert cfg.roles["worker"].delegation == "disabled"
+    assert cfg.harnesses["c"].environment.policy == "ambient"
+    assert cfg.harnesses["c"].environment.state_dir is None
+    assert cfg.harnesses["c"].environment.instructions_file is None
+    assert cfg.harnesses["c"].environment.verified_capabilities == ()
+
+
 def test_validate_config_ok(tmp_path):
     from orchestra.config import load_config, validate_config
     p = tmp_path / "config.yaml"
@@ -217,3 +269,159 @@ def test_semantic_requires_sandbox(tmp_path):
     validate_config(ok)  # sandbox on → allowed
     off = Config(validate_semantic=False, sandbox=Sandbox(enabled=False), **base)
     validate_config(off)  # semantic off (default) → allowed
+
+
+def test_isolated_harness_requires_outer_sandbox(tmp_path: Path):
+    from orchestra.config import load_config, validate_config
+
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "slots: 1\n"
+        "roles:\n"
+        "  validator: {harness: codex, model: m, prompt: p}\n"
+        "  worker: {harness: codex, model: m, prompt: p}\n"
+        "  verifier: {harness: codex, model: m, prompt: p}\n"
+        "harnesses:\n"
+        "  codex:\n"
+        "    kind: codex\n"
+        "    executable: codex\n"
+        "    environment: {policy: isolated, "
+        "verified_capabilities: [isolates_user_skills]}\n"
+        "sandbox: {enabled: false}\n"
+    )
+    with pytest.raises(ValueError, match="isolation requires sandbox"):
+        validate_config(load_config(p))
+
+
+def test_required_isolation_capability_uses_effective_envelope(tmp_path: Path):
+    from orchestra.config import load_config, validate_config
+
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "slots: 1\n"
+        "roles:\n"
+        "  validator: {harness: codex, model: m, prompt: p}\n"
+        "  worker:\n"
+        "    harness: codex\n"
+        "    model: m\n"
+        "    prompt: p\n"
+        "    required_capabilities: [isolates_user_skills]\n"
+        "  verifier: {harness: codex, model: m, prompt: p}\n"
+        "harnesses:\n"
+        "  codex:\n"
+        "    kind: codex\n"
+        "    executable: codex\n"
+        "    environment: {policy: isolated, "
+        "verified_capabilities: [isolates_user_skills]}\n"
+        "sandbox: {enabled: true}\n"
+    )
+    validate_config(load_config(p))
+
+
+def test_codex_rejects_explicit_bundle_because_native_discovery_cannot_be_disabled(
+    tmp_path: Path,
+):
+    from orchestra.config import load_config, validate_config
+
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "slots: 1\n"
+        "roles:\n"
+        "  validator: {harness: codex, model: m, prompt: p}\n"
+        "  worker: {harness: codex, model: m, prompt: p, instruction_policy: explicit_bundle}\n"
+        "  verifier: {harness: codex, model: m, prompt: p}\n"
+        "harnesses:\n  codex: {kind: codex, executable: codex}\n"
+    )
+    with pytest.raises(ValueError, match="native_project"):
+        validate_config(load_config(p))
+
+
+def _policy_config():
+    from orchestra.config import Config, HarnessConfig, RoleConfig, Sandbox
+
+    roles = {
+        role: RoleConfig(harness="codex", model="m", prompt="p")
+        for role in ("validator", "worker", "verifier")
+    }
+    return Config(
+        slots=1,
+        roles=roles,
+        validate_semantic=False,
+        harnesses={"codex": HarnessConfig(kind="codex", executable="codex")},
+        sandbox=Sandbox(enabled=False),
+        retries_cap=2,
+        workflows={},
+        verify_rerun_checks=False,
+        autoapprove=False,
+        template_path="projects/project-template",
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("instruction_policy", "ambient", "instruction_policy"),
+        ("delegation", "sometimes", "delegation"),
+    ],
+)
+def test_validate_config_rejects_invalid_role_policy(field, value, message):
+    from orchestra.config import validate_config
+
+    config = _policy_config()
+    setattr(config.roles["worker"], field, value)
+
+    with pytest.raises(ValueError, match=message):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_harness_environment_policy():
+    from orchestra.config import HarnessEnvironment, validate_config
+
+    config = _policy_config()
+    config.harnesses["codex"].environment = HarnessEnvironment(policy="private")
+
+    with pytest.raises(ValueError, match="environment policy"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_policy_on_unused_harness():
+    from orchestra.config import HarnessConfig, HarnessEnvironment, validate_config
+
+    config = _policy_config()
+    config.harnesses["unused"] = HarnessConfig(
+        kind="claude",
+        executable="claude",
+        environment=HarnessEnvironment(policy="private"),
+    )
+
+    with pytest.raises(ValueError, match="unused.*environment policy"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_instructions_file_without_isolated_codex():
+    from orchestra.config import validate_config
+
+    config = _policy_config()
+    config.harnesses["codex"].environment.instructions_file = "automation/AGENTS.md"
+    config.harnesses["codex"].environment.policy = "ambient"
+
+    with pytest.raises(ValueError, match="instructions_file.*isolated Codex"):
+        validate_config(config)
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["--enable", "multi_agent"],
+        ["--disable=multi_agent"],
+        ["--config", "features.multi_agent=false"],
+    ],
+)
+def test_validate_config_rejects_multi_agent_extra_args(extra_args):
+    from orchestra.config import validate_config
+
+    config = _policy_config()
+    config.harnesses["codex"].extra_args = extra_args
+
+    with pytest.raises(ValueError, match="delegation.*multi_agent"):
+        validate_config(config)

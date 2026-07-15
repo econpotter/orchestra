@@ -14,11 +14,11 @@ Required invocation features are:
 - explicit model, tools, permission mode, and MCP configuration;
 - `--resume <session_id>` for bounded recovery.
 
-Use `--setting-sources project,local` only as transitional containment. The durable
-`project_only` policy in the harness contract resolves and fingerprints project instructions,
-then disables ambient customizations. `--bare` is not an automatic answer: it skips
-`CLAUDE.md` discovery and keychain/OAuth reads, so it requires explicit instruction and
-authentication provisioning.
+The isolated envelope uses a dedicated `CLAUDE_CONFIG_DIR`, masks personal `$HOME/.claude`,
+uses `--safe-mode --disable-slash-commands`, and disallows the `Agent` delegation tool. Orchestra
+resolves and supplies the repository instruction bundle exactly once. Dedicated authentication
+must be established through `orchestra harness setup` and verified with `harness doctor`;
+personal OAuth/config files are never copied into the isolated directory.
 
 ## Stream ownership
 
@@ -61,9 +61,11 @@ Preflight records `claude --version`, validates required flags, and inspects `sy
 the actual model, tool set, MCP servers, plugins, plugin errors, and capabilities. Prefer
 advertised capabilities over brittle version comparisons when available.
 
-The initial capture used Claude Code `2.1.203`. `claude auth status` reported a logged-in Pro
-subscription, but the canary returned HTTP 401 after structured retries. That failure is a real
-adapter fixture and a fail-loud rollout blocker, not a reason to fabricate success data.
+The initial failure capture used Claude Code `2.1.203`. A later worker and verifier completed
+through the transient service, proving structured lifecycle and reconciliation, but that run
+preceded the dedicated config directory. A dedicated-directory init probe exposed no personal
+plugins or skills and no `Agent` tool, but failed authentication. Isolation capabilities remain
+unverified until the authenticated exact-envelope sentinel completes.
 
 ## Claude canaries
 

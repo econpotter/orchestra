@@ -8,9 +8,10 @@ This repository contains the public Orchestra engine, CLI, protocol, prompts, an
 units. It is deliberately separate from an Orchestra workspace, which contains private
 project registrations, queues, configuration, and runtime state.
 
-Claude and Codex are the supported agent harnesses. A `PiJsonAdapter` is specified at the
-protocol level so the architecture remains harness-neutral, but the Pi harness implementation
-is deferred to a later feature.
+Claude and Codex are implemented adapter targets; an installation is not rollout-supported
+until its exact harness version and service envelope pass the documented real canaries. A
+`PiJsonAdapter` is specified at the protocol level so the architecture remains harness-neutral,
+but the Pi harness implementation is deferred to a later feature.
 
 ## Install from source
 
@@ -37,12 +38,17 @@ uv tool install --force --editable "$PWD"
 ```
 
 The editable installation keeps the executable tied to this checkout. Confirm the executable
-before operating a workspace:
+and loaded package contents before operating a workspace:
 
 ```sh
 command -v orchestra
 orchestra --help
+orchestra engine provenance --compare "$PWD"
 ```
+
+`engine provenance` exits nonzero if the loaded package differs from the checkout. Every
+attempt also retains this package fingerprint, the harness executable/version, and the
+effective execution-envelope fingerprint.
 
 ## Create a separate workspace
 
@@ -98,7 +104,23 @@ Workspace resolution order is explicit `--root`, `ORCHESTRA_ROOT`,
 Start from `config.example.yaml`. Each role names a supervised harness and model. Orchestra's
 Codex and Claude adapters own the required structured-event and native-result-schema flags;
 do not copy CLI argument vectors into configuration. Harness executables must already be
-installed, authenticated, and available on the scheduler's `PATH`.
+installed and available on the scheduler's `PATH`.
+
+The example uses an isolated Codex state directory. Prepare and authenticate it, then require a
+successful doctor report before resuming unattended dispatch:
+
+```sh
+orchestra harness setup codex
+# Run the exact CODEX_HOME=... codex login command that setup prints.
+orchestra harness doctor codex
+```
+
+Orchestra never copies or symlinks personal Codex authentication into this directory. Dispatch
+preflights authentication in the configured `CODEX_HOME` and records
+`authentication_failure` without launching a model when credentials are unavailable.
+If project `AGENTS.md` files rely on a separate global coding contract, set
+`harnesses.<name>.environment.instructions_file`; setup installs that file as the isolated
+`CODEX_HOME/AGENTS.md`, and doctor/dispatch fail loudly when it is missing or has drifted.
 
 A current Claude process configuration is:
 
@@ -109,12 +131,20 @@ harnesses:
     executable: claude
     reasoning_effort: high
     sandbox: danger-full-access
+    environment: {policy: isolated, state_dir: .orchestra/homes/claude}
     attempts_cap: 3
 ```
 
-Set `roles.<role>.harness: claude` and choose the corresponding Claude model. The adapter
-preflights the installed CLI and fails loudly if required protocol flags are missing. The
-`danger-full-access` setting is appropriate only inside an execution boundary you trust;
+Set `roles.<role>.harness: claude`, `roles.<role>.instruction_policy: explicit_bundle`, and
+choose the corresponding Claude model. Isolated Claude uses `--safe-mode`, disabling native
+customization and instruction discovery while Orchestra supplies the recorded project bundle
+exactly once. Run `orchestra harness setup claude`, authenticate with the printed
+`CLAUDE_CONFIG_DIR=... claude auth login` command, and require `orchestra harness doctor claude`
+to pass. The dedicated config directory plus the outer home mask prevents personal plugins,
+skills, integrations, and sessions from entering the run. The adapter preflights the installed
+CLI and fails loudly if required protocol
+flags are missing. The `danger-full-access` setting is appropriate only inside an execution
+boundary you trust;
 enable the workspace's outer `sandbox` when filesystem confinement is required.
 
 The supervised adapters and evidence contract are documented
@@ -139,7 +169,8 @@ The plan or spec must be committed to the project’s base branch before dispatc
 
 Key commands include `issue add`, `issue list`, `issue show`, `status`, `logs`, `diff`,
 `approve`, `reject`, `kill`, `project add`, `pause`, `resume`, `dispatch`, `reconcile`, and
-`tick`. Run `orchestra guide` or `orchestra <command> --help` for the live interface.
+`tick`. Use `orchestra attempt explain ATTEMPT_ID` for retained failure and provenance
+evidence. Run `orchestra guide` or `orchestra <command> --help` for the live interface.
 
 ## Install the scheduler
 
