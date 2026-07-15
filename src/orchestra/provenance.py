@@ -14,11 +14,17 @@ def package_tree_digest(package_root: str | Path) -> str:
         path for path in root.rglob("*")
         if path.is_file() and path.suffix != ".pyc" and "__pycache__" not in path.parts
     )
-    for path in paths:
-        relative = path.relative_to(root).as_posix().encode()
+    logical_files = {
+        path.relative_to(root).as_posix(): path.read_bytes() for path in paths
+    }
+    source_prompts = root.parents[1] / "prompts" if root.parent.name == "src" else None
+    if source_prompts and source_prompts.is_dir():
+        for path in sorted(source_prompts.glob("*.md")):
+            logical_files[f"defaults/prompts/{path.name}"] = path.read_bytes()
+    for name, content in sorted(logical_files.items()):
+        relative = name.encode()
         digest.update(len(relative).to_bytes(8, "big"))
         digest.update(relative)
-        content = path.read_bytes()
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)
     return digest.hexdigest()

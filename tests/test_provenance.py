@@ -20,3 +20,20 @@ def test_runtime_provenance_identifies_loaded_package():
     assert provenance["version"]
     assert Path(provenance["package_root"]).name == "orchestra"
     assert len(provenance["package_sha256"]) == 64
+
+
+def test_source_and_installed_prompt_layouts_have_same_digest(tmp_path: Path):
+    source = tmp_path / "checkout" / "src" / "orchestra"
+    source.mkdir(parents=True)
+    (source / "module.py").write_text("code\n")
+    prompts = tmp_path / "checkout" / "prompts"
+    prompts.mkdir()
+    (prompts / "worker.md").write_text("prompt\n")
+
+    installed = tmp_path / "installed" / "orchestra"
+    defaults = installed / "defaults" / "prompts"
+    defaults.mkdir(parents=True)
+    (installed / "module.py").write_text("code\n")
+    (defaults / "worker.md").write_text("prompt\n")
+
+    assert package_tree_digest(source) == package_tree_digest(installed)
