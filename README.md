@@ -50,6 +50,11 @@ orchestra engine provenance --compare "$PWD"
 attempt also retains this package fingerprint, the harness executable/version, and the
 effective execution-envelope fingerprint.
 
+Sandboxed runs require both `systemd-run` and Bubblewrap (`bwrap`) on the host. The transient
+user service owns process lifetime; Bubblewrap enforces the read-only root, writable attempt
+paths, and masked personal harness state. Orchestra fails dispatch explicitly if `bwrap` is
+missing. Network access remains shared so the harness can reach its model API.
+
 ## Create a separate workspace
 
 Do not put operational data in this repository. Create a separate directory for it; the path
@@ -190,7 +195,8 @@ journalctl --user -u orchestra.service -n 50
 
 Before relying on unattended runs, confirm that the `PATH` in
 `~/.config/systemd/user/orchestra.service` includes `orchestra`, the selected harness CLI,
-and tools used by project checks. The one-shot service intentionally uses `KillMode=process`
+and tools used by project checks. The one-shot scheduler service intentionally uses
+`KillMode=process`
 so detached harness processes survive the tick that launched them. See
 [`protocol/OPERATIONS.md`](protocol/OPERATIONS.md) for scheduler details and a cron fallback.
 

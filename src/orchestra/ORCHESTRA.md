@@ -53,8 +53,8 @@ worker.
 
 **Do not run `orchestra tick`, `orchestra dispatch`, or `orchestra reconcile` from
 Herdr.** Run execution commands from an external host shell, or leave them to the host
-scheduler. Supervised workers use a transient user systemd service as their verified outer
-filesystem boundary; a confined session may not have the host user-manager authority or
+scheduler. Supervised workers use Bubblewrap inside a transient user systemd service as their
+verified outer filesystem boundary; a confined session may not have the host user-manager authority or
 filesystem view needed to create it. Run engine Git/worktree
 commands (`approve` and `retry-merge`) from the external host shell as well.
 
@@ -65,7 +65,7 @@ Each issue inherits its project's `Worktree-Seed` entries from the workspace's
 `PROJECTS.md`; issues do not duplicate them. Entries are comma-separated: `path` copies a
 seed, `path:link` creates a writable symlink, and `path:ro-link` shares the project source
 read-only inside workers and verifiers. An untracked destination is a symlink; an existing
-tracked path is protected read-only by the outer systemd boundary. A missing source fails
+tracked path is protected read-only by the outer Bubblewrap boundary. A missing source fails
 dispatch. `orchestra issue show <project> <n>` prints the effective seed list.
 
 ## Wiring a project (one-time)

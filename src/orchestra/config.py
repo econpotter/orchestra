@@ -50,6 +50,7 @@ class Sandbox:
     enabled: bool
     kind: str = "systemd"
     executable: str = "systemd-run"
+    filesystem_executable: str = "bwrap"
 
 
 @dataclass
@@ -120,6 +121,7 @@ def load_config(path: str | Path) -> Config:
         enabled=bool(sb.get("enabled", False)),
         kind=str(sb.get("kind", "systemd")),
         executable=str(sb.get("executable", "systemd-run")),
+        filesystem_executable=str(sb.get("filesystem_executable", "bwrap")),
     )
     workflows = {
         name: {str(k): str(v) for k, v in (block or {}).items()}

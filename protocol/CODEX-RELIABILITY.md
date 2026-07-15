@@ -25,8 +25,11 @@ Required invocation features are:
 The execution envelope preserves the operator's ordinary `HOME` so Git, package managers,
 project tools, and their credentials continue to work. It sets `CODEX_HOME` to an
 Orchestra-specific writable directory containing minimal generated automation configuration,
-session state, and harness-owned authentication. Personal `$HOME/.agents` is masked inside the
-transient systemd service so user skills cannot be discovered through the preserved home.
+session state, and harness-owned authentication. Personal `$HOME/.agents` is masked by
+Bubblewrap inside the transient systemd service so user skills cannot be discovered through
+the preserved home. The service owns process lifetime and records defense-in-depth path
+properties; those user-service properties are not treated as the enforcing filesystem
+boundary because some hosts do not apply them.
 
 Authentication is established separately in the dedicated `CODEX_HOME`; Orchestra never copies,
 symlinks, logs, or places `auth.json` in attempt artifacts. Setup and doctor commands report the
@@ -82,8 +85,8 @@ not interpret tool-yield wording inside an agent message and does not start a re
 while the original Codex process lives. Command polling remains prompt-level defense in depth
 until real fixtures establish whether the Codex event stream exposes intermediate yield state.
 
-Nested Bubblewrap failure remains an execution-boundary preflight error. Inner Codex sandbox
-bypass is permitted only when the supervisor proves an external sandbox is active.
+Bubblewrap startup failure remains an execution-boundary error. Inner Codex sandbox bypass is
+permitted only when the supervisor proves Orchestra's outer Bubblewrap boundary is active.
 
 ## Resume
 

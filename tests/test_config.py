@@ -88,6 +88,7 @@ def test_config_harness_defaults(tmp_path):
     assert cfg.harnesses == {}
     assert cfg.sandbox.enabled is False
     assert cfg.sandbox.executable == "systemd-run"
+    assert cfg.sandbox.filesystem_executable == "bwrap"
     assert cfg.retries_cap == 2
     assert cfg.roles["worker"].prompt if cfg.roles else True  # roles untouched
 

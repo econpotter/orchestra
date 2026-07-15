@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import json
 import hashlib
-import sys
-import subprocess
-import uuid
-import shutil
+import json
 import os
+import shutil
+import subprocess
+import sys
 import time
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 
@@ -63,23 +63,26 @@ def _launch_fingerprint(argv: list[str]) -> str:
 def _supervisor_service_argv(root: Path, attempt, config: Config) -> list[str]:
     unit = str(attempt.data["configuration"]["outer_sandbox_unit"])
     worktree = Path(attempt.data["worktree"])
-    properties = ["ProtectSystem=strict", "ProtectHome=read-only",
-                  f"ReadWritePaths={attempt.directory}"]
+    read_write_paths = [str(attempt.directory)]
     if attempt.data["role"] == "worker":
-        properties.append(f"ReadWritePaths={worktree}")
+        read_write_paths.append(str(worktree))
         common_git = subprocess.run(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
             cwd=worktree, text=True, capture_output=True, check=True,
         ).stdout.strip()
-        properties.append(f"ReadWritePaths={common_git}")
+        read_write_paths.append(common_git)
     attempt_config = attempt.data["configuration"]
-    for _source, target in attempt_config.get("read_only_binds", ()):
-        properties.append(f"ReadOnlyPaths={target}")
+    read_only_binds = attempt_config.get("read_only_binds", ())
     envelope = attempt_config.get("execution_envelope", {})
     for path in envelope.get("read_write_paths", ()):
-        properties.append(f"ReadWritePaths={path}")
-    for path in envelope.get("inaccessible_paths", ()):
-        properties.append(f"InaccessiblePaths={path}")
+        read_write_paths.append(str(path))
+    read_write_paths = list(dict.fromkeys(read_write_paths))
+    inaccessible_paths = [str(path).removeprefix("-") for path in
+                          envelope.get("inaccessible_paths", ())]
+    properties = ["ProtectSystem=strict", "ProtectHome=read-only"]
+    properties += [f"ReadWritePaths={path}" for path in read_write_paths]
+    properties += [f"ReadOnlyPaths={target}" for _source, target in read_only_binds]
+    properties += [f"InaccessiblePaths=-{path}" for path in inaccessible_paths]
     environment = {
         "ORCHESTRA_OUTER_SANDBOX": unit,
         "PATH": os.environ.get("PATH", ""),
@@ -91,7 +94,25 @@ def _supervisor_service_argv(root: Path, attempt, config: Config) -> list[str]:
         argv.append(f"--setenv={key}={value}")
     for prop in properties:
         argv += ["--property", prop]
-    return argv + ["--", sys.executable, "-m", "orchestra.supervisor", str(attempt.path)]
+    filesystem_argv = [
+        config.sandbox.filesystem_executable,
+        "--die-with-parent",
+        "--ro-bind", "/", "/",
+        "--dev-bind", "/dev", "/dev",
+        "--proc", "/proc",
+        "--tmpfs", "/tmp",
+        "--chdir", str(root),
+    ]
+    for path in read_write_paths:
+        filesystem_argv += ["--bind", path, path]
+    for source, target in read_only_binds:
+        filesystem_argv += ["--ro-bind", str(source), str(target)]
+    for path in inaccessible_paths:
+        filesystem_argv += ["--tmpfs", path]
+    filesystem_argv += [
+        "--", sys.executable, "-m", "orchestra.supervisor", str(attempt.path)
+    ]
+    return argv + ["--", *filesystem_argv]
 
 
 def _start_supervisor(root: Path, attempt, config: Config) -> tuple[int, str]:
@@ -113,6 +134,11 @@ def _start_supervisor(root: Path, attempt, config: Config) -> tuple[int, str]:
         )
         return process.pid, ""
 
+    if shutil.which(config.sandbox.filesystem_executable) is None:
+        raise RuntimeError(
+            "filesystem sandbox executable not found: "
+            f"{config.sandbox.filesystem_executable}"
+        )
     unit = str(attempt.data["configuration"]["outer_sandbox_unit"])
     argv = _supervisor_service_argv(root, attempt, config)
     AttemptStore(root).update(
@@ -327,6 +353,7 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                     "outer_sandbox_enabled": config.sandbox.enabled,
                     "outer_sandbox_kind": config.sandbox.kind,
                     "outer_sandbox_executable": config.sandbox.executable,
+                    "filesystem_sandbox_executable": config.sandbox.filesystem_executable,
                     "outer_sandbox_unit": supervisor_unit,
                     "read_only_binds": [[str(source), str(target)]
                                         for source, target in read_only_binds],

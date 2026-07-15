@@ -69,6 +69,10 @@ A **tick** is one `dispatch` then `reconcile`:
   `loginctl enable-linger "$USER"`, `systemctl --user daemon-reload`,
   `systemctl --user enable --now orchestra.timer`. Logs via journald
   (`journalctl --user -u orchestra.service`).
+  Sandboxed workers additionally require `bwrap` on `PATH`. Each worker runs Bubblewrap inside
+  its transient user service: systemd owns process lifetime, while Bubblewrap enforces the
+  filesystem boundary. Orchestra fails dispatch if the configured filesystem sandbox
+  executable is absent.
   - **systemd gotchas the shipped unit handles (keep them):** `KillMode=process` — a
     oneshot's default cgroup kill reaps the detached agents the instant `tick` exits, so
     they die mid-run. `Environment=PATH=…` — user services get a minimal PATH; it must include

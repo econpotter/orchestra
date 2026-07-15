@@ -58,12 +58,12 @@ to `held`, which is not dispatchable. `orchestra release <project> <number>` pro
 network issues from `held` to `validated` during the next reconcile.
 
 At run time the `Network` flag is **advisory** — there is no per-issue network jail.
-`sandbox.enabled` provides **filesystem** confinement, not
-network isolation: `argv_prefix` runs each agent under `bwrap` with the rootfs ro-bound and
-only its workdir/tmp/results_dir writable, so a confined agent cannot write outside its
-worktree — but the network is shared, because the agent must reach its own model API to run
-at all. Real per-issue network isolation would require an egress allowlist or proxy; it is
-deliberately out of scope for a lean orchestrator.
+`sandbox.enabled` provides **filesystem** confinement, not network isolation. Orchestra runs
+the supervisor under `bwrap` inside a transient user systemd service, with the root filesystem
+read-only and only the attempt, role-specific worktree, Git metadata, temporary directory, and
+isolated harness state writable. The network is shared because the harness must reach its own
+model API to run at all. Real per-issue network isolation would require an egress allowlist or
+proxy; it is deliberately out of scope for a lean orchestrator.
 
 (Historical note: issue #004 shipped a `bwrap --unshare-all` prefix that claimed to
 network-isolate `Network: false` agents. It was broken two ways — the prefix bound no

@@ -1,12 +1,15 @@
+import json
 import subprocess
 import sys
 import time
-import json
+from types import SimpleNamespace
 
-import pytest
 from pathlib import Path
 
+import pytest
+
 from orchestra.config import load_config
+from orchestra.dispatch import _start_supervisor as real_start_supervisor
 from orchestra.dispatch import dispatch
 from orchestra.registry import issue_key, load_registry
 from orchestra.selection import pid_alive
@@ -191,6 +194,17 @@ def test_dispatch_records_instruction_provenance_and_isolated_service_envelope(
     assert f"--setenv=CODEX_HOME={tmp_path / '.orchestra' / 'homes' / 'fake'}" in argv
     assert f"InaccessiblePaths=-{Path.home() / '.agents'}" in argv
     assert f"ReadWritePaths={tmp_path / '.orchestra' / 'homes' / 'fake'}" in argv
+    bwrap = argv.index("bwrap")
+    assert argv[bwrap:bwrap + 5] == ["bwrap", "--die-with-parent", "--ro-bind", "/", "/"]
+    assert ["--tmpfs", "/tmp"] in [
+        argv[index:index + 2] for index in range(bwrap, len(argv) - 1)
+    ]
+    assert ["--bind", str(attempt.directory), str(attempt.directory)] in [
+        argv[index:index + 3] for index in range(bwrap, len(argv) - 2)
+    ]
+    assert ["--tmpfs", str(Path.home() / ".agents")] in [
+        argv[index:index + 2] for index in range(bwrap, len(argv) - 1)
+    ]
     _wait_all_dead(tmp_path)
 
 
@@ -201,6 +215,21 @@ def test_launch_fingerprint_covers_full_argv():
     second = _launch_fingerprint(["systemd-run", "--property", "ProtectHome=no"])
     assert len(first) == 64
     assert first != second
+
+
+def test_outer_sandbox_fails_loud_when_filesystem_sandbox_is_missing(
+    tmp_path: Path, monkeypatch,
+):
+    import orchestra.dispatch as dispatch_module
+
+    _setup(tmp_path, _issue(1, "validated"))
+    cfg = load_config(tmp_path / "config.yaml")
+    cfg.sandbox.filesystem_executable = "missing-bwrap"
+    attempt = SimpleNamespace(data={"configuration": {"outer_sandbox_unit": "unit"}})
+    monkeypatch.setattr(dispatch_module.shutil, "which", lambda _executable: None)
+
+    with pytest.raises(RuntimeError, match="filesystem sandbox executable not found"):
+        real_start_supervisor(tmp_path, attempt, cfg)
 
 
 def test_dispatch_respects_slots(tmp_path: Path):

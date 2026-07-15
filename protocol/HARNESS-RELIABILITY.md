@@ -329,9 +329,14 @@ delegation. Role-owned delegation policies are `disabled`, `allowed`, and `requi
 Unattended roles default to `disabled`; adapters translate that policy into a deterministic
 harness feature/tool state. Raw extra arguments may not contradict the role policy.
 
-Outer and inner sandbox ownership is explicit. A harness may bypass its own sandbox only when
-Orchestra verifies that an external sandbox is active. Nested Bubblewrap failure is an
-execution-boundary preflight error, not a model or command-yield failure.
+Outer and inner sandbox ownership is explicit. A transient user systemd service owns process
+lifetime and retains defense-in-depth path properties; Bubblewrap inside that service enforces
+the read-only root, explicit writable paths, read-only seeds, and masked personal harness
+state. User-service path properties alone are not accepted as isolation evidence because some
+hosts do not enforce them. A harness may bypass its own sandbox only when Orchestra verifies
+that this external Bubblewrap boundary is active. Missing or failed Bubblewrap is an
+execution-boundary error, not a model or command-yield failure. Network remains shared so the
+harness can reach its model API.
 
 ## Compatibility and protocol drift
 
