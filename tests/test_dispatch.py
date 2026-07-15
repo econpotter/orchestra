@@ -192,8 +192,7 @@ def test_dispatch_records_instruction_provenance_and_isolated_service_envelope(
     attempt = AttemptStore(tmp_path).load(handle.attempt_id)
     argv = _supervisor_service_argv(tmp_path, attempt, cfg)
     assert f"--setenv=CODEX_HOME={tmp_path / '.orchestra' / 'homes' / 'fake'}" in argv
-    assert f"InaccessiblePaths=-{Path.home() / '.agents'}" in argv
-    assert f"ReadWritePaths={tmp_path / '.orchestra' / 'homes' / 'fake'}" in argv
+    assert "--property" not in argv
     bwrap = argv.index("bwrap")
     assert argv[bwrap:bwrap + 5] == ["bwrap", "--die-with-parent", "--ro-bind", "/", "/"]
     assert ["--tmpfs", "/tmp"] in [
@@ -211,8 +210,8 @@ def test_dispatch_records_instruction_provenance_and_isolated_service_envelope(
 def test_launch_fingerprint_covers_full_argv():
     from orchestra.dispatch import _launch_fingerprint
 
-    first = _launch_fingerprint(["systemd-run", "--property", "ProtectHome=read-only"])
-    second = _launch_fingerprint(["systemd-run", "--property", "ProtectHome=no"])
+    first = _launch_fingerprint(["systemd-run", "--", "bwrap", "--ro-bind", "/", "/"])
+    second = _launch_fingerprint(["systemd-run", "--", "bwrap", "--bind", "/", "/"])
     assert len(first) == 64
     assert first != second
 

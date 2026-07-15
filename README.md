@@ -51,7 +51,7 @@ attempt also retains this package fingerprint, the harness executable/version, a
 effective execution-envelope fingerprint.
 
 Sandboxed runs require both `systemd-run` and Bubblewrap (`bwrap`) on the host. The transient
-user service owns process lifetime; Bubblewrap enforces the read-only root, writable attempt
+user service owns process lifetime only; Bubblewrap enforces the read-only root, writable attempt
 paths, and masked personal harness state. Orchestra fails dispatch explicitly if `bwrap` is
 missing. Network access remains shared so the harness can reach its model API.
 

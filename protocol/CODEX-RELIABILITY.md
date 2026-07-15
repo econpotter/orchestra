@@ -27,9 +27,9 @@ project tools, and their credentials continue to work. It sets `CODEX_HOME` to a
 Orchestra-specific writable directory containing minimal generated automation configuration,
 session state, and harness-owned authentication. Personal `$HOME/.agents` is masked by
 Bubblewrap inside the transient systemd service so user skills cannot be discovered through
-the preserved home. The service owns process lifetime and records defense-in-depth path
-properties; those user-service properties are not treated as the enforcing filesystem
-boundary because some hosts do not apply them.
+the preserved home. The service owns process lifetime only. Systemd path sandbox properties
+are not combined with Bubblewrap: some hosts do not enforce them, and on others their mount
+namespace prevents Bubblewrap from creating the enforcing namespace.
 
 Authentication is established separately in the dedicated `CODEX_HOME`; Orchestra never copies,
 symlinks, logs, or places `auth.json` in attempt artifacts. Setup and doctor commands report the

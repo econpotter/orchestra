@@ -79,10 +79,6 @@ def _supervisor_service_argv(root: Path, attempt, config: Config) -> list[str]:
     read_write_paths = list(dict.fromkeys(read_write_paths))
     inaccessible_paths = [str(path).removeprefix("-") for path in
                           envelope.get("inaccessible_paths", ())]
-    properties = ["ProtectSystem=strict", "ProtectHome=read-only"]
-    properties += [f"ReadWritePaths={path}" for path in read_write_paths]
-    properties += [f"ReadOnlyPaths={target}" for _source, target in read_only_binds]
-    properties += [f"InaccessiblePaths=-{path}" for path in inaccessible_paths]
     environment = {
         "ORCHESTRA_OUTER_SANDBOX": unit,
         "PATH": os.environ.get("PATH", ""),
@@ -92,8 +88,6 @@ def _supervisor_service_argv(root: Path, attempt, config: Config) -> list[str]:
             f"--working-directory={root}"]
     for key, value in environment.items():
         argv.append(f"--setenv={key}={value}")
-    for prop in properties:
-        argv += ["--property", prop]
     filesystem_argv = [
         config.sandbox.filesystem_executable,
         "--die-with-parent",
