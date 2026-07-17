@@ -78,7 +78,18 @@ def test_status_json(tmp_path, capsys):
     _setup(tmp_path)
     rc = main(["--root", str(tmp_path), "status", "--json"])
     assert rc == 0
-    assert json.loads(capsys.readouterr().out)["counts"]["open"] == 1
+    data = json.loads(capsys.readouterr().out)
+    assert data["counts"]["open"] == 1
+    assert data["issues"] == [
+        {
+            "project": "wf",
+            "number": 1,
+            "status": "open",
+            "priority": 1,
+            "title": "alpha",
+            "blocked_deps": [],
+        }
+    ]
 
 
 def test_status_text_includes_issue_rows(tmp_path, capsys):

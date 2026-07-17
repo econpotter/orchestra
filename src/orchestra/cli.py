@@ -369,12 +369,13 @@ def cmd_issue_show(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     root = Path(args.root)
     s = summarize(Path(args.root))
+    s["issues"] = _issue_list_rows(list(_all_issues(root)))
     if args.json:
         print(json.dumps(s))
     else:
         print(f"slots used: {s['slots_used']}")
         print("counts: " + ", ".join(f"{k}={v}" for k, v in sorted(s["counts"].items())))
-        for row in _issue_list_rows(list(_all_issues(root))):
+        for row in s["issues"]:
             _print_issue_row(row)
     return 0
 
