@@ -1,8 +1,11 @@
 # Orchestra
 
 Orchestra runs development work across many repositories unattended. You plan and promote
-issues; Orchestra dispatches a validator, worker, and verifier on a schedule, then asks for
-human approval or intervention when policy requires it.
+issues; Orchestra dispatches a validator, worker, and verifier on a schedule, each running in
+a sandboxed harness process, then asks for human approval or intervention when policy
+requires it.
+
+Status: alpha, in active development and daily use by its author.
 
 This repository contains the public Orchestra engine, CLI, protocol, prompts, and scheduler
 units. It is deliberately separate from an Orchestra workspace, which contains private
