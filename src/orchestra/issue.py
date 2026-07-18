@@ -4,7 +4,7 @@ import re
 import sys
 from dataclasses import dataclass
 
-_HEADER_RE = re.compile(r"^##\s+#(\d+)\s+([A-Za-z0-9_-]+):\s+(.+?)\s*$")
+_HEADER_RE = re.compile(r"^##\s+#(\d+)\s+([A-Za-z0-9._-]+):\s+(.+?)\s*$")
 _NULLS = {"", "null", "none"}
 _TRUE = {"true", "yes", "1", "on"}
 

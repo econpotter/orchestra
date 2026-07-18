@@ -43,6 +43,19 @@ def test_round_trip():
     assert reparsed == issue
 
 
+def test_dotted_project_name_round_trip():
+    # Project names may contain dots (e.g. a GitHub Pages repo like
+    # econpotter.github.io); the writer accepts them, so the parser must too.
+    block = BLOCK.replace(
+        "## #042 weather-api: add API retry",
+        "## #042 econpotter.github.io: rebuild site: identity hub",
+    )
+    issue = parse_issue(block)
+    assert issue.project == "econpotter.github.io"
+    assert issue.title == "rebuild site: identity hub"
+    assert parse_issue(render_issue(issue)) == issue
+
+
 def test_null_optionals():
     issue = parse_issue(BLOCK)
     issue.plan = None
