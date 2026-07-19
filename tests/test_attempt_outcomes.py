@@ -70,3 +70,37 @@ def test_model_cannot_make_its_own_block_retryable():
     result = RoleResult(1, "blocked", "", "time_limit", "model says retry", False)
     evidence = AttemptEvidence("worker", False, result, "success", "", "s", True, 1, 3)
     assert decide_attempt(evidence).action == "blocked"
+
+
+def test_empty_branch_crash_blocks_with_crash_reason_when_unrecoverable():
+    # #011: a rerun with no commit beyond the issue base and no result is a genuine crash —
+    # it must still block (never read as success) and name the condition when it does.
+    evidence = AttemptEvidence(
+        role="worker", new_commit=False, result=None, terminal="turn_failed",
+        failure_category="needs_human", session_id="", resume_capable=True,
+        attempts_used=1, attempts_cap=3,
+    )
+    decision = decide_attempt(evidence)
+    assert decision.action == "blocked"
+    assert decision.reason == "crash: no new commit and no result"
+
+
+def test_empty_branch_crash_blocks_once_attempts_exhausted():
+    evidence = AttemptEvidence(
+        role="worker", new_commit=False, result=None, terminal="turn_failed",
+        failure_category="harness_failure", session_id="", resume_capable=True,
+        attempts_used=2, attempts_cap=2,
+    )
+    decision = decide_attempt(evidence)
+    assert decision.action == "blocked"
+    assert "crash: no new commit and no result" in decision.reason
+
+
+def test_genuine_crash_still_recovers_while_attempts_remain():
+    # Classification unchanged: a recoverable crash keeps retrying, it is not force-blocked.
+    evidence = AttemptEvidence(
+        role="worker", new_commit=False, result=None, terminal="turn_failed",
+        failure_category="harness_failure", session_id="", resume_capable=True,
+        attempts_used=1, attempts_cap=3,
+    )
+    assert decide_attempt(evidence).action == "fresh_attempt"

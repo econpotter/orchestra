@@ -49,6 +49,11 @@ def main() -> int:
     if role == "worker" and mode == "commit":
         _commit(Path.cwd())
         outcome, decisions = "committed", "fake decision"
+    elif role == "worker" and mode == "report_committed":
+        # Report committed WITHOUT making a new commit — models a rerun onto a branch whose
+        # head already holds the prior worker's commit (#011): the work is already present and
+        # the tree clean, so the worker commits nothing new.
+        outcome, decisions = "committed", "fake decision"
     elif role == "validator" and mode == "validated":
         outcome, decisions = "validated", ""
     elif role == "verifier" and mode == "accept":

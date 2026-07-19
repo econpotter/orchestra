@@ -49,6 +49,11 @@ def decide_attempt(evidence: AttemptEvidence) -> AttemptDecision:
                 and evidence.resume_capable and evidence.session_id
                 and evidence.attempts_used < evidence.attempts_cap):
             return AttemptDecision("resume", "finalize committed work after interrupted turn")
+        if evidence.role == "worker" and not evidence.new_commit and result is None:
+            # Genuine crash: nothing committed beyond the issue base and no result. Recovery
+            # still owns the action (resume/fresh_attempt while retries remain, block when
+            # exhausted or unrecoverable) — the reason just names the condition when it blocks.
+            return recovery(evidence.failure_category, "crash: no new commit and no result")
         return recovery(evidence.failure_category, evidence.terminal)
 
     if evidence.role == "worker":

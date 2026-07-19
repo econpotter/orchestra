@@ -34,6 +34,21 @@ def test_branch_head(git_repo: Path, tmp_path: Path):
     assert len(sha_after) == 40
 
 
+def test_merge_base_returns_issue_base_after_commits(git_repo: Path, tmp_path: Path):
+    # #011: the issue base is where the branch diverged from main, so it stays fixed even after
+    # the worker commits — that stable baseline is what makes committed work count as new work.
+    base = git_ops.branch_head(git_repo, "main")
+    wt = tmp_path / "wt"
+    git_ops.create_worktree(git_repo, wt, "issue/011-b", "main")
+    assert git_ops.merge_base(git_repo, "main", "issue/011-b") == base
+
+    (wt / "feature.txt").write_text("work\n")
+    _run(wt, "add", "feature.txt")
+    _run(wt, "commit", "-m", "do work")
+    assert git_ops.merge_base(git_repo, "main", "issue/011-b") == base
+    assert git_ops.branch_head(git_repo, "issue/011-b") != base
+
+
 def test_merge_branch(git_repo: Path, tmp_path: Path):
     wt = tmp_path / "wt"
     git_ops.create_worktree(git_repo, wt, "issue/002-y", "main")

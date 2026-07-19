@@ -108,6 +108,26 @@ def test_verifier_reject_advances_once_to_needs_rework(tmp_path: Path, monkeypat
     assert manifest["failure_category"] == ""
 
 
+def test_rerun_onto_completed_branch_counts_prior_commit_as_success(tmp_path, monkeypatch):
+    # #011: a worker re-dispatched onto a branch whose head already holds the prior worker's
+    # commit finds the work already present and the tree clean, so it reports committed WITHOUT
+    # a new commit. Baselining the attempt at the issue base (not the relaunch-time head) makes
+    # that existing commit count as new work, so the rerun resolves to committed — it is never
+    # misread as a no-commit contract failure and blocked.
+    _setup(tmp_path)
+    status, _ = _run(tmp_path, monkeypatch, "commit")
+    assert status == "committed"
+
+    # Re-dispatch onto the completed branch (models a crash reset / needs_rework requeue).
+    issues = read_queue(tmp_path / "queue" / "wf.md")
+    find_issue(issues, 1).status = "validated"
+    write_queue(tmp_path / "queue" / "wf.md", issues)
+
+    status, manifest = _run(tmp_path, monkeypatch, "report_committed")
+    assert status == "committed"
+    assert manifest["retry_disposition"] == "committed"
+
+
 def test_structured_quota_failure_resumes_same_session_with_bound(tmp_path: Path, monkeypatch):
     _setup(tmp_path, network=True)
     status, manifest = _run(tmp_path, monkeypatch, "session_limit")
