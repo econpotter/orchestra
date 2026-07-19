@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 from orchestra import git_ops, layout
@@ -62,6 +63,24 @@ def _canonical_result(attempt: Attempt):
         )
     except (ValueError, OSError):
         return None
+
+
+def _remove_session_home(root: Path, attempt: Attempt) -> None:
+    """Delete a finalized attempt's private per-launch harness home (#010).
+
+    Only the isolated launch's own copy under `.orchestra/homes/.sessions/` is removed, so a
+    stray or misconfigured path can never escalate into deleting the shared source home or
+    anything outside the managed homes tree. A resume seeds the child from this home and deletes
+    it itself, so we skip cleanup while a resume is pending."""
+    sessions_root = (root / ".orchestra" / "homes" / ".sessions").resolve()
+    envelope = attempt.data.get("configuration", {}).get("execution_envelope", {})
+    for raw in envelope.get("read_write_paths", ()):
+        path = Path(raw).resolve()
+        try:
+            path.relative_to(sessions_root)
+        except ValueError:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _attempt_count(store: AttemptStore, attempt: Attempt) -> int:
@@ -197,6 +216,8 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
             attempts_used=_attempt_count(store, attempt), attempts_cap=attempts_cap,
         ))
         store.update(attempt, retry_disposition=decision.action)
+        if decision.action != "resume":
+            _remove_session_home(root, attempt)  # a resume reuses this home; keep it
 
         if decision.action in {"resume", "fresh_attempt"}:
             prior = attempt.data["configuration"].get("dispatch_status", "validated")

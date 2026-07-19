@@ -8,7 +8,9 @@ from orchestra.harness import (
     ClaudePrintAdapter,
     CodexExecAdapter,
     HarnessLaunch,
+    NormalizedEvent,
     RoleResult,
+    _category_from_events,
     parse_role_result,
     role_contract_instruction,
     role_schema,
@@ -199,6 +201,24 @@ def test_codex_fixture_normalizes_complete_lifecycle():
         "session_started", "turn_started", "agent_message", "turn_completed"
     ]
     assert normalized[0].details["session_id"] == "thread-fixture"
+
+
+def test_stale_token_mid_run_classifies_transient_not_hard_auth_failure():
+    # #010: the token-refresh-race messages from orchestra#009 must classify as the transient
+    # `authentication_expired` (which requeues), distinct from a genuine `authentication_failure`.
+    for message in ("auth token expired mid-run",
+                    "verifier died in stale-token window",
+                    "please reauthenticate: session expired"):
+        events = [NormalizedEvent("turn_failed", "result", {"error": message})]
+        assert _category_from_events(events) == "authentication_expired"
+
+
+def test_invalid_credentials_still_classifies_as_hard_auth_failure():
+    # A genuinely unauthenticated harness (invalid credentials / 401) stays a terminal block.
+    events = [NormalizedEvent("turn_failed", "result", {
+        "error": "Failed to authenticate. API Error: 401 Invalid authentication credentials",
+    })]
+    assert _category_from_events(events) == "authentication_failure"
 
 
 def test_claude_optimistic_success_with_auth_error_is_failure():

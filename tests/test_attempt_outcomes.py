@@ -42,6 +42,30 @@ def test_resume_is_bounded_and_requires_session_capability():
                                           **{**base, "session_id": ""})).action == "blocked"
 
 
+def test_stale_token_requeues_while_unauthenticated_blocks():
+    # #010: a mid-run stale/rotated token is transient — requeue a fresh attempt (which
+    # re-seeds a fresh authenticated home) — but a genuinely unauthenticated harness blocks.
+    base = dict(role="worker", new_commit=False, result=None, terminal="turn_failed",
+                session_id="", resume_capable=True, attempts_used=1, attempts_cap=3)
+    assert decide_attempt(
+        AttemptEvidence(failure_category="authentication_expired", **base)
+    ).action == "fresh_attempt"
+    assert decide_attempt(
+        AttemptEvidence(failure_category="authentication_failure", **base)
+    ).action == "blocked"
+
+
+def test_stale_token_requeue_is_bounded_by_attempt_cap():
+    base = dict(role="worker", new_commit=False, result=None, terminal="turn_failed",
+                failure_category="authentication_expired", session_id="", resume_capable=True)
+    assert decide_attempt(
+        AttemptEvidence(attempts_used=2, attempts_cap=3, **base)
+    ).action == "fresh_attempt"
+    assert decide_attempt(
+        AttemptEvidence(attempts_used=3, attempts_cap=3, **base)
+    ).action == "blocked"
+
+
 def test_model_cannot_make_its_own_block_retryable():
     result = RoleResult(1, "blocked", "", "time_limit", "model says retry", False)
     evidence = AttemptEvidence("worker", False, result, "success", "", "s", True, 1, 3)

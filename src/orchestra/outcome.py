@@ -38,7 +38,9 @@ def decide_attempt(evidence: AttemptEvidence) -> AttemptDecision:
             return AttemptDecision("resume", reason)
         if category in {"quota_failure", "upstream_failure", "harness_failure",
                         "protocol_failure", "tool_observation_failure",
-                        "environment_failure"}:
+                        "environment_failure", "authentication_expired"}:
+            # authentication_expired: a mid-run stale/rotated token (#010). A fresh attempt
+            # re-seeds a fresh authenticated per-launch home rather than blocking a human.
             return AttemptDecision("fresh_attempt", reason)
         return AttemptDecision("blocked", reason or f"unrecoverable {category}")
 

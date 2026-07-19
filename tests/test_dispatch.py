@@ -207,7 +207,14 @@ def test_dispatch_records_instruction_provenance_and_isolated_service_envelope(
 
     attempt = AttemptStore(tmp_path).load(handle.attempt_id)
     argv = _supervisor_service_argv(tmp_path, attempt, cfg)
-    assert f"--setenv=CODEX_HOME={tmp_path / '.orchestra' / 'homes' / 'fake'}" in argv
+    # #010: each launch runs in a private per-attempt copy of the harness home so concurrent
+    # launches cannot invalidate each other's auth; the live CODEX_HOME is that session home,
+    # seeded from the shared `.orchestra/homes/fake` source, never the source itself.
+    session_home = (
+        tmp_path / ".orchestra" / "homes" / ".sessions" / "fake" / handle.attempt_id
+    )
+    assert f"--setenv=CODEX_HOME={session_home}" in argv
+    assert session_home.is_dir()
     assert "--property" not in argv
     bwrap = argv.index("bwrap")
     assert argv[bwrap:bwrap + 5] == ["bwrap", "--die-with-parent", "--ro-bind", "/", "/"]

@@ -23,7 +23,13 @@ from orchestra.harness import (
     preflight_harness,
     role_schema,
 )
-from orchestra.envelope import build_execution_envelope, execution_envelope_fingerprint
+from orchestra.envelope import (
+    build_execution_envelope,
+    execution_envelope_fingerprint,
+    managed_auth_home,
+    seed_session_home,
+    session_state_home,
+)
 from orchestra.prompting import (
     CODEX_INSTRUCTION_MAX_BYTES,
     InstructionBundle,
@@ -361,12 +367,34 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                     "delegation": role_cfg.delegation,
                 }
                 adapter = adapter_for(harness.kind)
+                # Per-launch auth home: each attempt gets a private copy of the harness state
+                # dir so concurrent workers/verifiers of the same harness cannot invalidate one
+                # another's OAuth session when the CLI refreshes an expiring token (#010).
                 envelope = build_execution_envelope(
                     root, role_cfg.harness, harness, adapter.capabilities,
                     home=Path.home(), instruction_policy=role_cfg.instruction_policy,
+                    session_key=attempt_id,
                 )
                 for path in envelope.read_write_paths:
                     Path(path).mkdir(parents=True, mode=0o700, exist_ok=True)
+                if harness.environment.policy == "isolated":
+                    session_home = session_state_home(root, role_cfg.harness, attempt_id)
+                    source_home = managed_auth_home(
+                        root, role_cfg.harness, harness.environment.state_dir
+                    )
+                    # A resume must inherit the parent launch's session state (transcript +
+                    # its already-refreshed token), so seed from the parent's home; the parent
+                    # is finalized (sequential), so there is no concurrent writer to clobber.
+                    seed_home = source_home
+                    if attempt_config["resume_session"] and retry_parent is not None:
+                        parent_home = session_state_home(
+                            root, role_cfg.harness, retry_parent.attempt_id
+                        )
+                        if parent_home.is_dir():
+                            seed_home = parent_home
+                    seed_session_home(seed_home, session_home)
+                    if seed_home != source_home:
+                        shutil.rmtree(seed_home, ignore_errors=True)  # consumed the parent home
                 attempt_config["execution_envelope"] = asdict(envelope)
                 instruction_setup_error = ""
                 if harness.kind == "codex" and harness.environment.instructions_file:
