@@ -9,10 +9,31 @@ from typing import Any, Protocol
 
 
 FAILURE_CATEGORIES = {
-    "authentication_failure", "quota_failure", "upstream_failure", "harness_failure",
-    "protocol_failure", "tool_observation_failure", "environment_failure",
+    "authentication_failure", "authentication_expired", "quota_failure", "upstream_failure",
+    "harness_failure", "protocol_failure", "tool_observation_failure", "environment_failure",
     "acceptance_failure", "needs_human", "cancelled", "time_limit",
 }
+
+# Mid-run auth failures whose message signals an *expired/rotated* token rather than a
+# genuinely unauthenticated harness. A launch that passed dispatch preflight but then died in
+# a token-refresh/stale-token window (orchestra#009: "auth token expired mid-run", "verifier
+# died in stale-token window") is transient — a fresh attempt re-seeds a fresh authenticated
+# home — so it must requeue, not block. Kept distinct from `authentication_failure`, which
+# stays a loud, terminal block for an actually-unauthenticated harness. (This is the default
+# transient auth-expiry pattern list; genuine 401 "invalid credentials" is deliberately absent.)
+TRANSIENT_AUTH_PATTERNS = (
+    "token expired",
+    "token has expired",
+    "expired token",
+    "stale token",
+    "stale-token",
+    "session expired",
+    "credentials expired",
+    "authentication expired",
+    "auth expired",
+    "reauthenticate",
+    "re-authenticate",
+)
 ROLE_OUTCOMES = {
     "worker": ("committed", "blocked"),
     "validator": ("validated", "blocked"),
@@ -292,6 +313,8 @@ class ClaudePrintAdapter:
 
 def _category_from_events(events: list[NormalizedEvent]) -> str:
     text = json.dumps([event.details for event in events]).lower()
+    if any(pattern in text for pattern in TRANSIENT_AUTH_PATTERNS):
+        return "authentication_expired"
     if "authentication" in text or "http 401" in text or '"error_status": 401' in text:
         return "authentication_failure"
     if "quota" in text or "rate_limit" in text or "usage limit" in text:

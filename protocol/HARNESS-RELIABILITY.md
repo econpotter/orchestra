@@ -217,6 +217,7 @@ decision.
 Stable categories are:
 
 - `authentication_failure`;
+- `authentication_expired`;
 - `quota_failure`;
 - `upstream_failure`;
 - `harness_failure`;
@@ -235,6 +236,14 @@ state—for example, a tool started but neither completed nor remained observabl
 Retry disposition is one of `never`, `resume`, `fresh_attempt`, or `human`. Configuration maps
 structured categories and evidence to bounded policy. `needs_human`, `acceptance_failure`, and
 intentional cancellation never retry automatically.
+
+`authentication_failure` and `authentication_expired` differ by when auth breaks.
+`authentication_failure` is a genuinely unauthenticated harness—caught loud at dispatch preflight
+or seen as invalid credentials—and never retries automatically. `authentication_expired` is a
+launch that passed preflight but then died in a token-refresh/stale-token window; because each
+launch runs in a private per-attempt copy of the harness home (so a concurrent launch's OAuth
+refresh cannot invalidate it), that failure is transient and takes a bounded `fresh_attempt`,
+which re-seeds a fresh authenticated home rather than blocking a human.
 
 ## Commit and result truth tables
 
