@@ -1,6 +1,8 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from orchestra import git_ops
 
 
@@ -47,6 +49,24 @@ def test_merge_base_returns_issue_base_after_commits(git_repo: Path, tmp_path: P
     _run(wt, "commit", "-m", "do work")
     assert git_ops.merge_base(git_repo, "main", "issue/011-b") == base
     assert git_ops.branch_head(git_repo, "issue/011-b") != base
+
+
+def test_merge_base_returns_none_for_unrelated_roots(git_repo: Path):
+    # #011/#013: two histories with no common ancestor is the ONE well-defined None case (git
+    # exit 1) — the worker baseline then falls back to the branch head. Not an error.
+    _run(git_repo, "checkout", "--orphan", "island")
+    (git_repo / "island.txt").write_text("alone\n")
+    _run(git_repo, "add", "island.txt")
+    _run(git_repo, "commit", "-m", "orphan root")
+    assert git_ops.merge_base(git_repo, "main", "island") is None
+
+
+def test_merge_base_raises_loudly_on_git_error(git_repo: Path):
+    # #013: a real git failure (bad ref) must raise, NOT collapse to the same None as unrelated
+    # roots — silently treating an error as 'no common ancestor' reinstates the #011 branch-head
+    # baseline bug whenever merge-base merely failed.
+    with pytest.raises(RuntimeError, match="merge-base"):
+        git_ops.merge_base(git_repo, "main", "refs/heads/does-not-exist")
 
 
 def test_merge_branch(git_repo: Path, tmp_path: Path):

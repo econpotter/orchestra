@@ -40,6 +40,10 @@ class HarnessConfig:
     sandbox: str = "workspace-write"
     extra_args: list[str] = field(default_factory=list)
     attempts_cap: int = 3
+    # Dedicated budget for provider-overload (HTTP 529) retries, kept separate from and larger
+    # than attempts_cap: overload is transient and self-clearing, so a brief overload window
+    # must not exhaust the genuine-failure cap (orchestra#011).
+    overload_attempts_cap: int = 6
     limits: AttemptLimits = field(default_factory=AttemptLimits)
     preflight: bool = True
     environment: HarnessEnvironment = field(default_factory=HarnessEnvironment)
@@ -101,6 +105,7 @@ def load_config(path: str | Path) -> Config:
             sandbox=str(hc.get("sandbox", "workspace-write")),
             extra_args=[str(arg) for arg in hc.get("extra_args", ())],
             attempts_cap=int(hc.get("attempts_cap", 3)),
+            overload_attempts_cap=int(hc.get("overload_attempts_cap", 6)),
             limits=AttemptLimits(**{
                 key: int(raw_limits.get(key, default)) for key, default in {
                     "wall_seconds": 0, "idle_seconds": 0,
@@ -233,6 +238,10 @@ def validate_config(config: Config) -> None:
             raise ValueError(f"config: role {name!r} requires unsupported capabilities: {', '.join(missing)}")
         if harness.attempts_cap < 1:
             raise ValueError(f"config: harness {role_cfg.harness!r} attempts_cap must be positive")
+        if harness.overload_attempts_cap < 1:
+            raise ValueError(
+                f"config: harness {role_cfg.harness!r} overload_attempts_cap must be positive"
+            )
         if harness.sandbox == "danger-full-access" and not config.sandbox.enabled:
             raise ValueError(
                 f"config: harness {role_cfg.harness!r} bypasses its inner sandbox; "

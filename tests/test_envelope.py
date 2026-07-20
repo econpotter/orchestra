@@ -156,6 +156,43 @@ def test_concurrent_launches_do_not_clobber_each_others_auth(tmp_path: Path):
     assert (source / ".credentials.json").read_text() == '{"token": "operator-seed"}'
 
 
+def test_reseed_wipes_stale_files_from_an_aborted_prior_copy(tmp_path: Path):
+    # #013: a prior seed that aborted mid-copy could leave a truncated credential behind; a
+    # retry must not inherit it. Reseeding starts from an empty target, so stale files are gone.
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    (source / ".credentials.json").write_text('{"token": "good"}')
+    session = session_state_home(tmp_path, "claude", "attempt-reseed")
+    session.mkdir(parents=True)
+    (session / ".credentials.json").write_text('{"token": "TRUNCA')  # aborted partial copy
+    (session / "stale-marker").write_text("left over from a failed seed")
+
+    seed_session_home(source, session)
+
+    assert (session / ".credentials.json").read_text() == '{"token": "good"}'
+    assert not (session / "stale-marker").exists()
+
+
+def test_seed_preserves_symlinks_rather_than_dereferencing(tmp_path: Path):
+    # #013: symlinks copy as links (symlinks=True), so a dangling link does not crash the seed
+    # and an out-of-tree target is not pulled in wholesale.
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    (source / "dangling").symlink_to(tmp_path / "nowhere")  # target does not exist
+    session = session_state_home(tmp_path, "claude", "attempt-symlink")
+
+    seed_session_home(source, session)
+
+    assert (session / "dangling").is_symlink()
+
+
+def test_session_key_traversal_fails_with_a_clear_error(tmp_path: Path):
+    # #013: a traversal-shaped session_key must be rejected explicitly, naming the offending
+    # key — not with a bare relative_to "is not in the subpath" exception.
+    with pytest.raises(ValueError, match="must not escape the managed homes tree"):
+        session_state_home(tmp_path, "claude", "../../../../../../etc/passwd")
+
+
 def test_unauthenticated_source_seeds_unauthenticated_launch_home(tmp_path: Path):
     # A genuinely unauthenticated harness (no credentials in the source) seeds an empty home,
     # so preflight_authentication still fails loud at dispatch (#010 criterion 3).

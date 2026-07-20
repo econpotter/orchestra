@@ -16,6 +16,12 @@ class AttemptEvidence:
     resume_capable: bool
     attempts_used: int
     attempts_cap: int
+    # Provider-overload (HTTP 529) retries are budgeted SEPARATELY from genuine failures:
+    # `attempts_used`/`attempts_cap` count only non-overload attempts, while these count the
+    # overload retries in the chain against their own (larger) cap. A brief overload window
+    # therefore cannot exhaust the genuine attempt budget and block the issue (orchestra#011).
+    overload_attempts: int = 0
+    overload_cap: int = 0
 
 
 @dataclass(frozen=True)
@@ -31,6 +37,15 @@ def decide_attempt(evidence: AttemptEvidence) -> AttemptDecision:
         if category in {"needs_human", "acceptance_failure", "cancelled",
                         "authentication_failure"}:
             return AttemptDecision("blocked", reason)
+        if category == "overloaded":
+            # Provider overload (HTTP 529) is transient and self-clearing. Requeue a fresh
+            # attempt — deferred to the next scheduler tick, which spaces the retries apart —
+            # under a dedicated overload budget, so a brief overload window cannot burn the
+            # small genuine-failure attempt cap and block the issue (orchestra#011: two 529s in
+            # 3.5 min). Overload retries never count toward attempts_cap.
+            if evidence.overload_attempts >= evidence.overload_cap:
+                return AttemptDecision("blocked", f"overload retries exhausted: {reason}")
+            return AttemptDecision("fresh_attempt", reason)
         if evidence.attempts_used >= evidence.attempts_cap:
             return AttemptDecision("blocked", f"attempt cap exhausted: {reason}")
         if category in {"time_limit", "quota_failure", "upstream_failure"} \

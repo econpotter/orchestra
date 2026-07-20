@@ -104,3 +104,37 @@ def test_genuine_crash_still_recovers_while_attempts_remain():
         attempts_used=1, attempts_cap=3,
     )
     assert decide_attempt(evidence).action == "fresh_attempt"
+
+
+def test_overload_requeues_under_its_own_budget_not_the_attempt_cap():
+    # #013: provider overload (HTTP 529) is transient — requeue a fresh (spaced) attempt under
+    # a dedicated overload budget. It must requeue even when the genuine attempt cap is fully
+    # spent, so a brief overload window cannot block an issue (orchestra#011: two 529s in 3.5 min).
+    base = dict(role="worker", new_commit=False, result=None, terminal="turn_failed",
+                failure_category="overloaded", session_id="", resume_capable=True)
+    assert decide_attempt(AttemptEvidence(
+        attempts_used=3, attempts_cap=3, overload_attempts=1, overload_cap=6, **base
+    )).action == "fresh_attempt"
+
+
+def test_overload_requeue_is_bounded_by_its_own_cap():
+    base = dict(role="worker", new_commit=False, result=None, terminal="turn_failed",
+                failure_category="overloaded", session_id="", resume_capable=True,
+                attempts_used=1, attempts_cap=3)
+    assert decide_attempt(AttemptEvidence(
+        overload_attempts=5, overload_cap=6, **base
+    )).action == "fresh_attempt"
+    blocked = decide_attempt(AttemptEvidence(overload_attempts=6, overload_cap=6, **base))
+    assert blocked.action == "blocked"
+    assert "overload retries exhausted" in blocked.reason
+
+
+def test_overload_attempts_do_not_burn_the_genuine_attempt_cap():
+    # A genuine failure after several overload retries still has its full genuine budget:
+    # attempts_used counts only non-overload attempts, so the issue is not force-blocked.
+    evidence = AttemptEvidence(
+        role="worker", new_commit=False, result=None, terminal="turn_failed",
+        failure_category="harness_failure", session_id="", resume_capable=True,
+        attempts_used=1, attempts_cap=3, overload_attempts=5, overload_cap=6,
+    )
+    assert decide_attempt(evidence).action == "fresh_attempt"

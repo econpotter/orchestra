@@ -42,12 +42,29 @@ def merge_base(repo: Path, ref_a: str, ref_b: str) -> str | None:
     instead of the relaunch-time branch head means any commit already sitting on the issue
     branch (e.g. a prior worker's, present when re-dispatched onto a completed branch) still
     counts as new work, so committed work is never misread as a no-commit contract failure.
-    Returns None if the refs share no history (unrelated roots)."""
+
+    Returns None ONLY for the well-defined 'no common ancestor' case (git exit 1, unrelated
+    roots) so the caller can fall back to the branch head. Any other nonzero exit — a bad ref,
+    a corrupt repo — raises loudly rather than collapsing to that same None: silently treating
+    a git error as 'unrelated roots' would reinstate the #011 branch-head baseline (and its
+    committed-work-misclassified-as-contract-failure bug) whenever merge-base merely failed."""
     proc = subprocess.run(
         ["git", "-C", str(repo), "merge-base", ref_a, ref_b],
         capture_output=True, text=True,
     )
-    return proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else None
+    if proc.returncode == 0:
+        out = proc.stdout.strip()
+        if out:
+            return out
+        raise RuntimeError(
+            f"git merge-base {ref_a} {ref_b} exited 0 with no output in {repo}"
+        )
+    if proc.returncode == 1:
+        return None  # no common ancestor (unrelated roots) — merge-base is undefined
+    raise RuntimeError(
+        f"git merge-base {ref_a} {ref_b} failed (exit {proc.returncode}) in {repo}: "
+        f"{(proc.stderr or proc.stdout).strip()}"
+    )
 
 
 def _worktree_for_branch(repo: Path, branch: str) -> Path | None:

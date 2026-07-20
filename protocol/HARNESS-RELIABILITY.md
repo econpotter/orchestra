@@ -220,6 +220,7 @@ Stable categories are:
 - `authentication_expired`;
 - `quota_failure`;
 - `upstream_failure`;
+- `overloaded`;
 - `harness_failure`;
 - `protocol_failure`;
 - `tool_observation_failure`;
@@ -243,7 +244,19 @@ or seen as invalid credentials—and never retries automatically. `authenticatio
 launch that passed preflight but then died in a token-refresh/stale-token window; because each
 launch runs in a private per-attempt copy of the harness home (so a concurrent launch's OAuth
 refresh cannot invalidate it), that failure is transient and takes a bounded `fresh_attempt`,
-which re-seeds a fresh authenticated home rather than blocking a human.
+which re-seeds a fresh authenticated home rather than blocking a human. A hard-authentication
+signal wins over transient-looking vocabulary: a message that both asks to reauthenticate and
+states the credential is invalid (e.g. `reauthenticate: invalid credentials`) is a genuine
+`authentication_failure`, because a token refresh cannot fix a rejected credential.
+
+`overloaded` is a provider-side overload (HTTP 529 / `overloaded`), distinct from `quota_failure`
+(a usage ceiling) and from a generic `upstream_failure`. Because overload is brief and
+self-clearing, it takes a bounded `fresh_attempt` under its OWN dedicated budget
+(`overload_attempts_cap`), separate from and larger than the genuine-failure `attempts_cap`, and
+the requeue is deferred to the next scheduler tick so retries are spaced apart. Overload retries
+never consume the genuine attempt cap: a brief overload window must not exhaust the budget meant
+for real failures and block the issue (orchestra#011 was blocked by two 529s inside 3.5 minutes
+when overload shared that cap).
 
 ## Commit and result truth tables
 
