@@ -71,7 +71,16 @@ def session_state_home(root: Path, harness_name: str, session_key: str) -> Path:
     """
     managed_root = _managed_root(root)
     home = (managed_root / ".sessions" / harness_name / session_key).resolve()
-    home.relative_to(managed_root)  # structural guarantee: never escapes managed homes
+    # Validate escape explicitly: a traversal-shaped session_key (e.g. "../../etc") must fail
+    # with a clear, actionable message, not a bare `relative_to` "is not in the subpath"
+    # exception whose text names resolved absolute paths rather than the offending key.
+    try:
+        home.relative_to(managed_root)
+    except ValueError:
+        raise ValueError(
+            "session_key must not escape the managed homes tree "
+            f"({managed_root}): {session_key!r}"
+        ) from None
     return home
 
 
@@ -82,15 +91,25 @@ def seed_session_home(source_home: Path, session_home: Path) -> None:
     invalidation: the harness's OAuth refresh only ever rewrites this launch's private copy.
     A missing or empty source seeds an empty (unauthenticated) home, so `preflight_authentication`
     still fails loud for a genuinely unauthenticated harness.
+
+    The target is wiped before reseeding: a prior seed that aborted mid-copy (crash, disk
+    quota) could otherwise leave a truncated credential file behind, which a retry would then
+    inherit and read as a valid-but-corrupt authenticated home. Starting from an empty target
+    guarantees the copy is all-or-nothing from the caller's perspective. Directories copy with
+    `symlinks=True` (and files with `follow_symlinks=False`) so a symlink in the source is
+    reproduced as a link rather than dereferenced — dereferencing crashes on a dangling link
+    and can pull in large or out-of-tree content, while the credential files themselves are
+    ordinary files, so per-launch auth isolation is unaffected.
     """
+    shutil.rmtree(session_home, ignore_errors=True)
     session_home.mkdir(parents=True, mode=0o700, exist_ok=True)
     if source_home.is_dir():
         for entry in source_home.iterdir():
             target = session_home / entry.name
             if entry.is_dir():
-                shutil.copytree(entry, target, dirs_exist_ok=True)
+                shutil.copytree(entry, target, symlinks=True, dirs_exist_ok=True)
             else:
-                shutil.copy2(entry, target)
+                shutil.copy2(entry, target, follow_symlinks=False)
     session_home.chmod(0o700)
 
 

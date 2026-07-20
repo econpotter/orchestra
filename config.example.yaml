@@ -27,6 +27,9 @@ harnesses:
     # envelope pass the documented sentinels; configured isolation alone is not evidence.
     extra_args: ["--skip-git-repo-check"]
     attempts_cap: 3
+    # Dedicated budget for transient provider-overload (HTTP 529) retries, spaced across
+    # scheduler ticks and kept separate from attempts_cap so overload cannot exhaust it.
+    overload_attempts_cap: 6
     limits: {wall_seconds: 14400, idle_seconds: 900, active_tool_seconds: 7200, grace_seconds: 20}
   claude:
     kind: claude
@@ -35,6 +38,7 @@ harnesses:
     sandbox: danger-full-access
     environment: {policy: isolated, state_dir: .orchestra/homes/claude}
     attempts_cap: 3
+    overload_attempts_cap: 6
     limits: {wall_seconds: 14400, idle_seconds: 900, active_tool_seconds: 7200, grace_seconds: 20}
 # Pi remains an adapter protocol sketch; no Pi harness is configured until it is implemented.
 # systemd owns process lifetime; Bubblewrap enforces the filesystem boundary. Both are

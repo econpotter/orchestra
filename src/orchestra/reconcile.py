@@ -83,16 +83,24 @@ def _remove_session_home(root: Path, attempt: Attempt) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def _attempt_count(store: AttemptStore, attempt: Attempt) -> int:
-    count = 1
-    parent_id = attempt.data.get("parent_attempt")
-    seen = {attempt.attempt_id}
-    while parent_id and parent_id not in seen:
-        seen.add(parent_id)
-        parent = store.load(parent_id)
-        count += 1
-        parent_id = parent.data.get("parent_attempt")
-    return count
+def _attempt_tally(store: AttemptStore, attempt: Attempt) -> tuple[int, int]:
+    """(genuine, overload) attempt counts across this attempt and its retry ancestors.
+
+    Provider-overload (HTTP 529) attempts are tallied separately so they bound against their own
+    dedicated cap and never consume the genuine-failure attempt cap: a brief overload window
+    must not exhaust the budget meant for real failures and block the issue (orchestra#011)."""
+    genuine = overload = 0
+    current: Attempt | None = attempt
+    seen: set[str] = set()
+    while current is not None and current.attempt_id not in seen:
+        seen.add(current.attempt_id)
+        if current.data.get("failure_category") == "overloaded":
+            overload += 1
+        else:
+            genuine += 1
+        parent_id = current.data.get("parent_attempt")
+        current = store.load(parent_id) if parent_id and parent_id not in seen else None
+    return genuine, overload
 
 
 def _blocked_evidence(attempt: Attempt, reason: str) -> str:
@@ -207,13 +215,16 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
         if new_head:
             store.update(attempt, terminal_commit=new_head)
         attempts_cap = int(attempt.data["configuration"].get("attempts_cap", 1))
+        overload_cap = int(attempt.data["configuration"].get("overload_attempts_cap", 6))
+        genuine_attempts, overload_attempts = _attempt_tally(store, attempt)
         decision = decide_attempt(AttemptEvidence(
             role=handle.role, new_commit=new_commit, result=result,
             terminal=str(attempt.data.get("terminal_outcome", "turn_failed")),
             failure_category=str(attempt.data.get("failure_category", "protocol_failure")),
             session_id=str(attempt.data.get("session_id", "")),
             resume_capable=bool(attempt.data.get("capabilities", {}).get("resume_session")),
-            attempts_used=_attempt_count(store, attempt), attempts_cap=attempts_cap,
+            attempts_used=genuine_attempts, attempts_cap=attempts_cap,
+            overload_attempts=overload_attempts, overload_cap=overload_cap,
         ))
         store.update(attempt, retry_disposition=decision.action)
         if decision.action != "resume":

@@ -367,7 +367,9 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                     "kind": harness.kind, "executable": harness.executable,
                     "reasoning_effort": harness.reasoning_effort,
                     "sandbox": harness.sandbox, "extra_args": harness.extra_args,
-                    "attempts_cap": harness.attempts_cap, "limits": asdict(harness.limits),
+                    "attempts_cap": harness.attempts_cap,
+                    "overload_attempts_cap": harness.overload_attempts_cap,
+                    "limits": asdict(harness.limits),
                     "resume_session": (retry_parent.data.get("session_id", "")
                                        if retry_parent and
                                        retry_parent.data.get("retry_disposition") == "resume"

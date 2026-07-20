@@ -10,8 +10,8 @@ from typing import Any, Protocol
 
 FAILURE_CATEGORIES = {
     "authentication_failure", "authentication_expired", "quota_failure", "upstream_failure",
-    "harness_failure", "protocol_failure", "tool_observation_failure", "environment_failure",
-    "acceptance_failure", "needs_human", "cancelled", "time_limit",
+    "overloaded", "harness_failure", "protocol_failure", "tool_observation_failure",
+    "environment_failure", "acceptance_failure", "needs_human", "cancelled", "time_limit",
 }
 
 # Mid-run auth failures whose message signals an *expired/rotated* token rather than a
@@ -33,6 +33,36 @@ TRANSIENT_AUTH_PATTERNS = (
     "auth expired",
     "reauthenticate",
     "re-authenticate",
+)
+# Hard-authentication signals that a token-refresh cannot fix: the credential itself is
+# rejected. These take precedence over TRANSIENT_AUTH_PATTERNS because a genuine failure often
+# ALSO carries transient-looking vocabulary — e.g. "reauthenticate: invalid credentials" both
+# asks to reauthenticate (transient-shaped) and states the credential is invalid (terminal).
+# Classifying that as transient would requeue a launch that can only fail again, so an invalid
+# credential must win and block loudly.
+INVALID_CREDENTIAL_PATTERNS = (
+    "invalid credentials",
+    "invalid credential",
+    "credentials are invalid",
+    "invalid api key",
+    "invalid_api_key",
+    "invalid x-api-key",
+    "invalid bearer token",
+)
+# Provider-overload signals (HTTP 529 / "overloaded"). Distinct from quota (which is a
+# usage-limit ceiling) and from a generic upstream_failure: overload is a brief, self-clearing
+# server-side condition, so it takes a bounded requeue SPACED across scheduler ticks under its
+# own budget (see decide_attempt) rather than burning the small genuine-failure attempt cap —
+# orchestra#011 was blocked 2026-07-19 by two 529s inside 3.5 minutes when overload consumed
+# that cap.
+OVERLOADED_PATTERNS = (
+    "overloaded",
+    "overloaded_error",
+    "http 529",
+    "status 529",
+    "error_status\": 529",
+    "code 529",
+    " 529 ",
 )
 ROLE_OUTCOMES = {
     "worker": ("committed", "blocked"),
@@ -315,10 +345,14 @@ def _category_from_events(events: list[NormalizedEvent]) -> str:
     # QUOTES auth vocabulary (e.g. a worker editing this very file) and must
     # never classify a run.
     text = json.dumps([event.details for event in events if event.kind == "turn_failed"]).lower()
+    if any(pattern in text for pattern in INVALID_CREDENTIAL_PATTERNS):
+        return "authentication_failure"
     if any(pattern in text for pattern in TRANSIENT_AUTH_PATTERNS):
         return "authentication_expired"
     if "authentication" in text or "http 401" in text or '"error_status": 401' in text:
         return "authentication_failure"
+    if any(pattern in text for pattern in OVERLOADED_PATTERNS):
+        return "overloaded"
     if "quota" in text or "rate_limit" in text or "usage limit" in text:
         return "quota_failure"
     if any(event.kind == "turn_failed" for event in events):

@@ -221,6 +221,33 @@ def test_invalid_credentials_still_classifies_as_hard_auth_failure():
     assert _category_from_events(events) == "authentication_failure"
 
 
+def test_reauthenticate_with_invalid_credentials_is_hard_auth_failure_not_transient():
+    # #013: a message that both asks to reauthenticate (transient-shaped) AND states the
+    # credential is invalid (terminal) must block, not requeue — a token refresh cannot fix a
+    # rejected credential. The hard-credential signal wins over the transient vocabulary.
+    events = [NormalizedEvent("turn_failed", "result", {
+        "error": "reauthenticate: invalid credentials",
+    })]
+    assert _category_from_events(events) == "authentication_failure"
+    # A bare reauthenticate/session-expired prompt with no invalid-credential signal stays transient.
+    transient = [NormalizedEvent("turn_failed", "result", {"error": "please reauthenticate"})]
+    assert _category_from_events(transient) == "authentication_expired"
+
+
+def test_provider_overload_529_classifies_as_transient_overloaded():
+    # #013: HTTP 529 / "overloaded" is a brief, self-clearing provider condition — a distinct
+    # transient category, not a generic upstream_failure that burns the attempt cap in minutes.
+    for message in ("API Error: 529 Overloaded",
+                    "overloaded_error: the model is overloaded",
+                    "HTTP 529"):
+        events = [NormalizedEvent("turn_failed", "result", {"error": message})]
+        assert _category_from_events(events) == "overloaded"
+    # Only error events classify: an overloaded 529 quoted in agent prose does not (no failed turn).
+    assert _category_from_events(
+        [NormalizedEvent("agent_message", "assistant", {"text": "the API returned 529 overloaded"})]
+    ) == ""
+
+
 def test_claude_optimistic_success_with_auth_error_is_failure():
     adapter = ClaudePrintAdapter()
     normalized = [event for raw in _events("claude-authentication-failure.jsonl")
