@@ -221,11 +221,11 @@ class CodexExecAdapter:
         if "session_started" not in kinds or "turn_started" not in kinds \
                 or not kinds or kinds[-1] != "turn_completed":
             return HarnessOutcome("turn_failed", "protocol_failure", "missing terminal lifecycle")
+        if result is not None:
+            return HarnessOutcome("success")
         if any(event.kind == "turn_failed" for event in events):
             return HarnessOutcome("turn_failed", _category_from_events(events) or "upstream_failure")
-        if result is None:
-            return HarnessOutcome("turn_failed", "protocol_failure", "missing valid role result")
-        return HarnessOutcome("success")
+        return HarnessOutcome("turn_failed", "protocol_failure", "missing valid role result")
 
 
 class ClaudePrintAdapter:
@@ -297,22 +297,24 @@ class ClaudePrintAdapter:
 
     def classify(self, *, process_exit: int, events: list[NormalizedEvent],
                  result: RoleResult | None) -> HarnessOutcome:
-        category = _category_from_events(events)
         if process_exit != 0:
-            return HarnessOutcome("turn_failed", category or "harness_failure",
+            return HarnessOutcome("turn_failed", _category_from_events(events) or "harness_failure",
                                   f"process exit {process_exit}")
         kinds = [event.kind for event in events]
         if "session_started" not in kinds or not kinds:
             return HarnessOutcome("turn_failed", "protocol_failure", "missing init/result")
-        if category or kinds[-1] == "turn_failed":
-            return HarnessOutcome("turn_failed", category or "upstream_failure")
-        if kinds[-1] != "turn_completed" or result is None:
-            return HarnessOutcome("turn_failed", "protocol_failure", "missing valid result")
-        return HarnessOutcome("success")
+        if kinds[-1] == "turn_completed" and result is not None:
+            return HarnessOutcome("success")
+        if "turn_failed" in kinds:
+            return HarnessOutcome("turn_failed", _category_from_events(events) or "upstream_failure")
+        return HarnessOutcome("turn_failed", "protocol_failure", "missing valid result")
 
 
 def _category_from_events(events: list[NormalizedEvent]) -> str:
-    text = json.dumps([event.details for event in events]).lower()
+    # Classification reads error events only — assistant/tool content routinely
+    # QUOTES auth vocabulary (e.g. a worker editing this very file) and must
+    # never classify a run.
+    text = json.dumps([event.details for event in events if event.kind == "turn_failed"]).lower()
     if any(pattern in text for pattern in TRANSIENT_AUTH_PATTERNS):
         return "authentication_expired"
     if "authentication" in text or "http 401" in text or '"error_status": 401' in text:

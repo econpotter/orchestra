@@ -230,6 +230,45 @@ def test_claude_optimistic_success_with_auth_error_is_failure():
     assert outcome.terminal == "turn_failed"
 
 
+def test_claude_success_run_that_quotes_auth_vocabulary_stays_success():
+    # orchestra#010/#011: a worker whose transcript merely discusses auth code
+    # (e.g. editing TRANSIENT_AUTH_PATTERNS) must not classify as auth failure.
+    adapter = ClaudePrintAdapter()
+    events = [
+        NormalizedEvent("session_started", "system/init", {"session_id": "s"}),
+        NormalizedEvent("tool_completed", "user/tool_result", {
+            "item": {"content": "authentication expired token expired reauthenticate"},
+        }),
+        NormalizedEvent("turn_completed", "result", {"is_error": False}),
+    ]
+    result = RoleResult(1, "committed", "", "", "commit abc", False)
+    outcome = adapter.classify(process_exit=0, events=events, result=result)
+    assert outcome.terminal == "success"
+
+
+def test_claude_failed_run_with_expired_token_still_classifies_transient():
+    adapter = ClaudePrintAdapter()
+    events = [
+        NormalizedEvent("session_started", "system/init", {"session_id": "s"}),
+        NormalizedEvent("turn_failed", "result", {"error": "token expired"}),
+    ]
+    outcome = adapter.classify(process_exit=0, events=events, result=None)
+    assert outcome.terminal == "turn_failed"
+    assert outcome.category == "authentication_expired"
+
+
+def test_claude_mid_run_failed_turn_superseded_by_completed_final_turn():
+    adapter = ClaudePrintAdapter()
+    events = [
+        NormalizedEvent("session_started", "system/init", {"session_id": "s"}),
+        NormalizedEvent("turn_failed", "result", {"error": "transient upstream hiccup"}),
+        NormalizedEvent("turn_completed", "result", {"is_error": False}),
+    ]
+    result = RoleResult(1, "committed", "", "", "commit abc", False)
+    outcome = adapter.classify(process_exit=0, events=events, result=result)
+    assert outcome.terminal == "success"
+
+
 def test_claude_adapter_passes_configured_effort_and_schema_value(tmp_path: Path):
     schema = tmp_path / "schema.json"
     schema.write_text('{"type":"object"}')
