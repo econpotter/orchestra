@@ -2,7 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from orchestra.projects import find_project, read_projects
+from orchestra.projects import (
+    DuplicateProjectError,
+    DuplicateProjectWarning,
+    ensure_name_available,
+    find_project,
+    read_projects,
+)
 
 PROJECTS = """\
 # Projects
@@ -39,6 +45,32 @@ def test_find_project_missing(tmp_path: Path):
     p = tmp_path / "PROJECTS.md"
     p.write_text(PROJECTS)
     assert find_project(read_projects(p), "nope") is None
+
+
+def test_read_projects_duplicate_name_warns(tmp_path: Path):
+    # A hand-introduced duplicate must be loud, not a silent first-match.
+    p = tmp_path / "PROJECTS.md"
+    p.write_text(
+        "# Projects\n\n"
+        "## openbrain\n- Path: projects/openbrain\n- Branch: main\n- Purpose: a\n"
+        "- Queue: queue/openbrain.md\n- Focus: none\n\n"
+        "## openbrain\n- Path: projects/openbrain\n- Branch: dev\n- Purpose: b\n"
+        "- Queue: queue/openbrain.md\n- Focus: none\n"
+    )
+    with pytest.warns(DuplicateProjectWarning, match="openbrain"):
+        projects = read_projects(p)
+    # still returns both blocks; the point is the load is no longer silent
+    assert [pr.name for pr in projects] == ["openbrain", "openbrain"]
+
+
+def test_ensure_name_available_rejects_registered(tmp_path: Path):
+    p = tmp_path / "PROJECTS.md"
+    p.write_text(PROJECTS)
+    with pytest.raises(DuplicateProjectError, match="task-engine"):
+        ensure_name_available(p, "task-engine")
+    # a fresh name and a missing registry are both fine
+    ensure_name_available(p, "brand-new")
+    ensure_name_available(tmp_path / "absent.md", "task-engine")
 
 
 def test_worktree_seed_parsing(tmp_path):

@@ -81,6 +81,18 @@ def test_project_add(tmp_path, capsys):
     assert "## newproj" in text and "projects/newproj" in text and "dev" in text
 
 
+def test_project_add_refuses_duplicate(tmp_path, capsys):
+    _setup(tmp_path)  # registers 'wf'
+    before = (tmp_path / "PROJECTS.md").read_text()
+    rc = main(["--root", str(tmp_path), "project", "add", "wf",
+               "--path", "projects/wf2", "--branch", "dev"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "wf" in err and "already registered" in err
+    # registry left untouched
+    assert (tmp_path / "PROJECTS.md").read_text() == before
+
+
 def test_issue_add_unregistered_project(tmp_path, capsys):
     _setup(tmp_path)  # registers 'wf' only
     rc = main(["--root", str(tmp_path), "issue", "add", "nonesuch",

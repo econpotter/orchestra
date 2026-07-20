@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from orchestra import layout
+from orchestra.projects import ensure_name_available
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -21,6 +22,7 @@ def new_project(
     template_path: str | Path,
 ) -> Path:
     root = Path(root)
+    ensure_name_available(root / "PROJECTS.md", name)
     dest = root / "projects" / name
     if dest.exists():
         raise FileExistsError(f"project dir already exists: {dest}")

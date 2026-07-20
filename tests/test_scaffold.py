@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from orchestra.projects import DuplicateProjectError
 from orchestra.scaffold import new_project
 
 
@@ -84,6 +85,20 @@ def test_new_project_refuses_existing(tmp_path: Path):
     (tmp_path / "projects" / "dup").mkdir()
     with pytest.raises(FileExistsError):
         new_project(tmp_path, "dup", lang="python", stage="alpha", template_path=tmpl)
+
+
+def test_new_project_refuses_registered_name(tmp_path: Path):
+    # Same duplicate-name guard as `project add`, and it fires before any
+    # scaffolding work touches disk (dest dir is never created).
+    tmpl = _fixture_template(tmp_path)
+    _setup_root(tmp_path)
+    (tmp_path / "PROJECTS.md").write_text(
+        "# Projects\n\n## dup\n- Path: projects/dup\n- Branch: main\n- Purpose: t\n"
+        "- Queue: queue/dup.md\n- Focus: none\n"
+    )
+    with pytest.raises(DuplicateProjectError, match="dup"):
+        new_project(tmp_path, "dup", lang="python", stage="alpha", template_path=tmpl)
+    assert not (tmp_path / "projects" / "dup").exists()
 
 
 def test_new_project_unknown_lang_raises(tmp_path: Path):
