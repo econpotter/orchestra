@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 import re
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+class DuplicateProjectError(ValueError):
+    """A project name is already present in the registry (or would collide)."""
+
+
+class DuplicateProjectWarning(UserWarning):
+    """A loaded registry contains more than one entry for the same name."""
 
 # Field keys may contain hyphens (e.g. `Worktree-Seed`) as well as spaces.
 _FIELD_RE = re.compile(r"^-\s*([A-Za-z -]+):\s*(.+?)\s*$")
@@ -87,7 +96,46 @@ def read_projects(path: str | Path) -> list[Project]:
                 worktree_db=_parse_db(fields.get("worktree-db", "")),
             )
         )
+    _warn_duplicate_names(projects)
     return projects
+
+
+def _warn_duplicate_names(projects: list[Project]) -> None:
+    """Surface duplicate registry entries instead of silently first-matching.
+
+    A hand-edited PROJECTS.md can register the same name twice (see commit
+    b3f9d65); left unchecked every lookup silently resolves to the first block.
+    """
+    seen: set[str] = set()
+    dupes: list[str] = []
+    for project in projects:
+        if project.name in seen and project.name not in dupes:
+            dupes.append(project.name)
+        seen.add(project.name)
+    if dupes:
+        names = ", ".join(repr(d) for d in dupes)
+        warnings.warn(
+            f"PROJECTS.md registers duplicate project name(s): {names}; "
+            "every lookup resolves to the first match",
+            DuplicateProjectWarning,
+            stacklevel=3,
+        )
+
+
+def registered_names(path: str | Path) -> list[str]:
+    """Names present in the registry file (empty if the file does not exist)."""
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [project.name for project in read_projects(p)]
+
+
+def ensure_name_available(path: str | Path, name: str) -> None:
+    """Raise if `name` is already registered — shared add/scaffold guard."""
+    if name in registered_names(path):
+        raise DuplicateProjectError(
+            f"project {name!r} is already registered in {Path(path).name}"
+        )
 
 
 def find_project(projects: list[Project], name: str) -> Project | None:

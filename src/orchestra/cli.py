@@ -28,7 +28,12 @@ from orchestra.issue import (
     branch_name,
     exception_detail,
 )
-from orchestra.projects import find_project, read_projects
+from orchestra.projects import (
+    DuplicateProjectError,
+    ensure_name_available,
+    find_project,
+    read_projects,
+)
 from orchestra.prompting import resolve_configured_instruction
 from orchestra.provenance import package_tree_digest, runtime_provenance
 from orchestra.queue import find_issue, read_queue, write_queue
@@ -482,6 +487,11 @@ def cmd_issue_add(args: argparse.Namespace) -> int:
 def cmd_project_add(args: argparse.Namespace) -> int:
     root = Path(args.root)
     pf = root / "PROJECTS.md"
+    try:
+        ensure_name_available(pf, args.name)
+    except DuplicateProjectError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     block = (
         f"\n## {args.name}\n- Path: {args.path}\n- Branch: {args.branch}\n"
         f"- Purpose: {args.purpose}\n- Queue: queue/{args.name}.md\n- Focus: none\n"
@@ -793,6 +803,9 @@ def cmd_new_project(args: argparse.Namespace) -> int:
             root, args.name, lang=args.lang, stage=args.stage,
             template_path=cfg.template_path,
         )
+    except DuplicateProjectError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     except FileExistsError as exc:
         print(str(exc), file=sys.stderr)
         return 2
