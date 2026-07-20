@@ -303,7 +303,25 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                         create_worktree_db(
                             root / project.path / ".env", workdir / ".env", issue.number
                         )
-                    start_sha = git_ops.branch_head(root / project.path, branch_name(issue))
+                    # Worker baseline is the issue base (merge-base with the project base
+                    # branch), NOT the relaunch-time branch head (#011). A re-dispatch onto a
+                    # branch whose head already holds the prior worker's commit would otherwise
+                    # baseline at that commit, making reconcile see no new commit and misclassify
+                    # the already-committed work as a contract failure. The issue base makes any
+                    # commit on the branch count as the worker's work. Fall back to the branch
+                    # head only if the refs share no history (unrelated roots — merge-base is
+                    # undefined). The verifier keeps the branch-head baseline: it must not add
+                    # commits at all, so the prior worker's commit must sit AT its baseline.
+                    issue_branch = branch_name(issue)
+                    if role == "worker":
+                        start_sha = (
+                            git_ops.merge_base(
+                                root / project.path, project.branch, issue_branch
+                            )
+                            or git_ops.branch_head(root / project.path, issue_branch)
+                        )
+                    else:
+                        start_sha = git_ops.branch_head(root / project.path, issue_branch)
                 role_cfg = config.roles[role]
                 harness = config.harnesses[role_cfg.harness]
                 ctx = build_context(

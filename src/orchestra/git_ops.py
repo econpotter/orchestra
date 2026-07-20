@@ -35,6 +35,21 @@ def branch_head(repo: Path, branch: str) -> str:
     return _git(repo, "rev-parse", f"refs/heads/{branch}").stdout.strip()
 
 
+def merge_base(repo: Path, ref_a: str, ref_b: str) -> str | None:
+    """Best common ancestor of two refs — the commit an issue branch was cut from.
+
+    Used as the attempt baseline (#011): measuring `start_sha` against this issue base
+    instead of the relaunch-time branch head means any commit already sitting on the issue
+    branch (e.g. a prior worker's, present when re-dispatched onto a completed branch) still
+    counts as new work, so committed work is never misread as a no-commit contract failure.
+    Returns None if the refs share no history (unrelated roots)."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", ref_a, ref_b],
+        capture_output=True, text=True,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else None
+
+
 def _worktree_for_branch(repo: Path, branch: str) -> Path | None:
     current: Path | None = None
     for line in _git(repo, "worktree", "list", "--porcelain").stdout.splitlines():
