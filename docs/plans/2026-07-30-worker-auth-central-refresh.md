@@ -1,11 +1,11 @@
 # Worker auth: central refresh of the shared harness token
 
 Date: 2026-07-30
-Status: implemented on this branch (feat/worker-auth-central-refresh); all
-five tasks complete; pending operator ratification of the decision of record
-below (supersedes the original #014 scoping, which assumed token death was a
-~monthly expiry chore; verified evidence shows it is a per-refresh
-revocation event, hours apart under active dispatch)
+Status: complete — merged to main 2026-07-30; decision of record ratified
+the same day (docs/design/DECISIONS.md). Supersedes the original #014
+scoping, which assumed token death was a ~monthly expiry chore; verified
+evidence shows it is a per-refresh revocation event, hours apart under
+active dispatch.
 
 ## Goal
 
