@@ -73,6 +73,22 @@ def test_layout_paths(tmp_path: Path):
     )
 
 
+def test_read_queue_skips_unparseable_block_and_keeps_the_rest(tmp_path: Path, capsys):
+    """A single malformed block (e.g. a missing Priority — issue #099's null-priority
+    traceback) must not crash read_queue for the whole file; every other project's dispatch
+    and reconcile depend on this call succeeding."""
+    broken = TWO + (
+        "\n## #003 weather-api: broken\n"
+        "Status: open\nPlan: null\nSpec: null\nDepends On: null\nRetries: 0\nWorker: null\n"
+        "Acceptance:\n- [ ] x\n### Decisions\n### Blocked Reason\n"
+    )
+    p = tmp_path / "q.md"
+    p.write_text(broken)
+    issues = read_queue(p)
+    assert [i.number for i in issues] == [1, 2]
+    assert "skipping unparseable issue block" in capsys.readouterr().err
+
+
 def test_next_number():
     from orchestra.queue import next_number
 

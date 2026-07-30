@@ -222,3 +222,32 @@ def test_recover_finalization_uses_durable_process_and_structured_evidence(tmp_p
     assert recovered.data["state"] == "completed"
     assert recovered.data["terminal_outcome"] == "success"
     assert recovered.data["recovered_finalization"] is True
+
+
+def test_unknown_status_self_reports_to_blocked(tmp_path: Path):
+    """A hand-written issue with a status the state machine doesn't know (e.g. copied from
+    another tool, or typo'd) has no role in selection.ROLE_FOR_STATUS, so dispatch silently
+    ignores it forever. Reconcile must still catch it and block it with a reason, instead of
+    leaving it dead with zero feedback (the failure this regression guards)."""
+    _setup(tmp_path, status="ready")
+    config = load_config(tmp_path / "config.yaml")
+
+    reconcile(tmp_path, config)
+
+    issue = find_issue(read_queue(tmp_path / "queue" / "wf.md"), 1)
+    assert issue.status == "blocked"
+    assert "unknown status 'ready'" in issue.blocked_reason
+    assert "orchestra issue add" in issue.blocked_reason
+
+
+def test_known_non_open_status_is_not_revalidated(tmp_path: Path):
+    """Guard against the gating fix over-reaching: a known, already-progressed status
+    (e.g. 'committed') must stay untouched by structural re-validation on every tick, even
+    if it would fail validate_structural (e.g. a Spec file removed after validation)."""
+    _setup(tmp_path, status="committed")
+    config = load_config(tmp_path / "config.yaml")
+
+    reconcile(tmp_path, config)
+
+    issue = find_issue(read_queue(tmp_path / "queue" / "wf.md"), 1)
+    assert issue.status == "committed"
