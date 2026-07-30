@@ -165,10 +165,14 @@ seeded from it with the refresh token removed, so a worker can never rotate — 
 revoke — the credential the rest of the fleet is using. Instead, dispatch refreshes it
 centrally: when less than `refresh_margin_seconds` (default 18000, five hours) of access-token
 life remains, it holds that harness's new launches until its running workers drain, refreshes
-the shared credential once, and resumes. A refresh that fails is reported by `orchestra status`
-and dispatch continues on the existing (unrotated) token — degraded, not blocked — until either
-the refresh trigger succeeds on a later dispatch boundary or the refresh-token horizon is
-reached, at which point `orchestra harness login claude` is needed to re-authenticate.
+the shared credential once, and resumes. A refresh that fails is reported by `orchestra status`.
+If the existing access token is still valid, dispatch continues on it — degraded, not
+blocked — until either the refresh trigger succeeds on a later dispatch boundary or the
+refresh-token horizon is reached. But if the access token is already expired when the refresh
+fails, that harness's dispatches are held instead of proceeding: an expired token would fail
+authentication preflight for every issue, which is a blocking outcome, so holding keeps the
+queue intact and retries the refresh each tick until `orchestra harness login claude` re-authenticates
+the home.
 
 The supervised adapters and evidence contract are documented
 in [`protocol/HARNESS-RELIABILITY.md`](protocol/HARNESS-RELIABILITY.md). Do not configure Pi

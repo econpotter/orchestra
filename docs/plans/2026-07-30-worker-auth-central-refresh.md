@@ -1,9 +1,11 @@
 # Worker auth: central refresh of the shared harness token
 
 Date: 2026-07-30
-Status: draft (supersedes the original #014 scoping, which assumed token
-death was a ~monthly expiry chore; verified evidence shows it is a
-per-refresh revocation event, hours apart under active dispatch)
+Status: implemented on this branch (feat/worker-auth-central-refresh); all
+five tasks complete; pending operator ratification of the decision of record
+below (supersedes the original #014 scoping, which assumed token death was a
+~monthly expiry chore; verified evidence shows it is a per-refresh
+revocation event, hours apart under active dispatch)
 
 ## Goal
 
@@ -73,22 +75,51 @@ token. This replaces the earlier proposed ruling that rejected write-back —
 that ruling assumed revocation was expiry-driven and ~monthly, which the
 2026-07-30 evidence disproved.
 
+## Implementation deviations
+
+- **Resume seeding.** Rather than seeding a resumed launch's whole home from
+  the shared home, resume launches seed from the parent session's home (so
+  `--resume` can still resolve its transcript inside `CLAUDE_CONFIG_DIR`) and
+  then `envelope.reseed_credentials` swaps in the shared home's credential,
+  re-stripped of its refresh token. Shared-home seeding wholesale was
+  rejected because it would have lost the transcript the resume exists for.
+- **Non-blocking dispatch-side locking.** Dispatch's credential-lock
+  acquisitions (`auth.credential_lock(..., blocking=False)`) are
+  non-blocking: a tick that finds the lock held (e.g. by an operator running
+  `doctor`/`login`) defers that harness to the next tick rather than
+  stalling the whole engine. Operator-driven `harness doctor` and `harness
+  login`, by contrast, block on the lock — they run once, interactively, and
+  are expected to wait.
+- **Doctor refuses rotation under load.** `harness doctor` refuses to trigger
+  a rotation when the token is stale (within the refresh margin) and workers
+  of that harness are active, reporting login `not_checked_workers_active`
+  instead — the obvious operator flow (status shows a held refresh, operator
+  runs doctor to see why) would otherwise 401 every in-flight worker.
+- **`harness login` requires `--force` while workers are active.** Login
+  rotates the shared credential outright, so it refuses unless the harness
+  is quiesced or the operator passes `--force`.
+- **Held rather than degraded on an expired token.** A failed refresh with
+  an access token that is *already expired* holds that harness's dispatches
+  (retried each tick) instead of proceeding degraded — proceeding would fail
+  every issue on authentication preflight, which is a blocking outcome, so
+  "degraded" would otherwise become "whole queue blocked."
+
 ## Acceptance criteria
 
-- [ ] Engine refreshes the shared home's token only while quiesced (no
+- [x] Engine refreshes the shared home's token only while quiesced (no
       active claude workers), atomically and under a lock; new dispatches
       seed the refreshed credential.
-- [ ] A dispatch whose access token has less remaining lifetime than the
+- [x] A dispatch whose access token has less remaining lifetime than the
       configured margin triggers drain-refresh-resume rather than seeding a
       near-dead token.
-- [ ] Per-launch seeds contain no refresh token (`envelope.py`); a worker
+- [x] Per-launch seeds contain no refresh token (`envelope.py`); a worker
       attempting refresh fails without side effects on the shared home or
       token family.
-- [ ] `harness doctor claude` detects server-side revocation (authenticated
+- [x] `harness doctor claude` detects server-side revocation (authenticated
       probe) and prints access/refresh expiry with a warning threshold.
-- [ ] `orchestra harness login <name>` performs the isolated-home login in
+- [x] `orchestra harness login <name>` performs the isolated-home login in
       one command.
-- [ ] Focused tests: quiescence gating, atomic locked write-back, refresh-
+- [x] Focused tests: quiescence gating, atomic locked write-back, refresh-
       token stripping, doctor probe, login subcommand. Ruff and strict mypy
       pass.
 
