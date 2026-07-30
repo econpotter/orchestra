@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -16,6 +17,10 @@ from pathlib import Path
 import pytest
 
 from orchestra import auth
+from orchestra.config import load_config
+from orchestra.dispatch import _refresh_managed_credentials
+from orchestra.registry import WorkerHandle
+from orchestra.selection import process_start_time
 
 
 def _write_credential(home: Path, *, expires_in: float, refresh_in: float = 30 * 86400,
@@ -259,3 +264,226 @@ def test_refresh_is_a_no_op_for_a_harness_without_an_auth_status_command(
 
     assert outcome.action == auth.NOT_NEEDED
     assert invocations == []
+
+
+# --- the dispatch-boundary gate ---------------------------------------------------
+
+GATE_CONFIG = """\
+slots: 2
+refresh_margin_seconds: 18000
+roles:
+  validator: {harness: codex, model: m, prompt: prompts/validator.md}
+  worker: {harness: claude, model: m, prompt: prompts/worker.md,
+           instruction_policy: explicit_bundle}
+  verifier: {harness: codex, model: m, prompt: prompts/verify-review.md}
+harnesses:
+  codex:
+    kind: codex
+    executable: codex
+    environment: {policy: isolated, state_dir: .orchestra/homes/codex}
+  claude:
+    kind: claude
+    executable: claude
+    environment: {policy: isolated, state_dir: .orchestra/homes/claude}
+sandbox: {enabled: true}
+"""
+
+
+def _gate_config(root: Path, extra: str = ""):
+    path = root / "config.yaml"
+    path.write_text(GATE_CONFIG + extra)
+    return load_config(path)
+
+
+def _handle(role: str, *, alive: bool) -> WorkerHandle:
+    pid = os.getpid() if alive else 0
+    return WorkerHandle(
+        project="wf", number=1, role=role, branch="issue/001-x", worktree="/tmp/wt",
+        pid=pid, attempt_id="a1", manifest="/tmp/a1/manifest.json",
+        stdout="/tmp/a1/stdout.jsonl", stderr="/tmp/a1/stderr.log",
+        started="2026-07-30T00:00:00+00:00", start_sha="abc",
+        proc_start=(process_start_time(pid) or "") if alive else "",
+    )
+
+
+def _shared_home(root: Path) -> Path:
+    return root / ".orchestra" / "homes" / "claude"
+
+
+def _record(root: Path) -> dict:
+    return json.loads((root / ".orchestra" / "auth-refresh.json").read_text())
+
+
+@pytest.fixture
+def refreshing_runner(monkeypatch):
+    """A fake trigger that persists a rotated credential, as the real CLI would."""
+    calls: list[list[str]] = []
+    homes: list[Path] = []
+
+    def fake(command, environment):
+        calls.append(command)
+        home = Path(environment["CLAUDE_CONFIG_DIR"])
+        homes.append(home)
+        _set_expiry(home, expires_in=40000)
+        return 0
+
+    monkeypatch.setattr(auth, "run_auth_status_command", fake)
+    return calls
+
+
+def test_gate_refreshes_a_stale_credential_when_the_harness_is_quiesced(
+    tmp_path: Path, refreshing_runner,
+):
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=600)
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    assert held == set()
+    assert refreshing_runner == [["claude", "auth", "status", "--json"]]
+    assert auth.is_stale(_shared_home(tmp_path), config.refresh_margin_seconds) is False
+    assert _record(tmp_path)["claude"]["outcome"] == auth.REFRESHED
+
+
+def test_gate_holds_launches_while_workers_of_that_harness_are_active(
+    tmp_path: Path, refreshing_runner, capsys,
+):
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=600)
+    reg = {"wf#001": _handle("worker", alive=True)}   # worker role runs on claude
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, reg, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    # Rotation revokes the token the live worker is holding, so it must not happen yet.
+    assert held == {"claude"}
+    assert refreshing_runner == []
+    assert auth.is_stale(_shared_home(tmp_path), config.refresh_margin_seconds) is True
+    assert _record(tmp_path)["claude"]["outcome"] == auth.HELD
+    assert "holding claude launches" in capsys.readouterr().err
+
+
+def test_gate_refreshes_once_the_harness_has_drained(tmp_path: Path, refreshing_runner):
+    """The held tick refreshes nothing; the next tick, after the drain, does."""
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=600)
+    reg = {"wf#001": _handle("worker", alive=True)}
+    started = "2026-07-30T00:00:00+00:00"
+
+    assert _refresh_managed_credentials(
+        tmp_path, config, reg, {"claude"}, started=started
+    ) == {"claude"}
+    assert _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started=started
+    ) == set()
+    assert refreshing_runner == [["claude", "auth", "status", "--json"]]
+    assert _record(tmp_path)["claude"]["outcome"] == auth.REFRESHED
+
+
+def test_gate_ignores_live_workers_of_a_different_harness(
+    tmp_path: Path, refreshing_runner,
+):
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=600)
+    reg = {"wf#002": _handle("validator", alive=True)}   # validator role runs on codex
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, reg, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    assert held == set()
+    assert len(refreshing_runner) == 1
+
+
+def test_gate_ignores_registry_rows_whose_supervisor_is_gone(
+    tmp_path: Path, refreshing_runner,
+):
+    """A stale row must not block refresh forever — that would let the token die."""
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=600)
+    reg = {"wf#001": _handle("worker", alive=False)}
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, reg, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    assert held == set()
+    assert len(refreshing_runner) == 1
+
+
+def test_gate_leaves_a_credential_with_life_left_alone(tmp_path: Path, invocations):
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=40000)
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    assert held == set()
+    assert invocations == []
+    assert not (tmp_path / ".orchestra" / "auth-refresh.json").exists()
+
+
+def test_gate_skips_harnesses_without_a_managed_claude_home(tmp_path: Path, invocations):
+    config = _gate_config(tmp_path, extra="")
+    _write_credential(tmp_path / ".orchestra" / "homes" / "codex", expires_in=600)
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, {}, {"codex"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    assert held == set()
+    assert invocations == []
+
+
+def test_gate_skips_when_the_expiry_cannot_be_determined(
+    tmp_path: Path, invocations, capsys,
+):
+    config = _gate_config(tmp_path)
+    _shared_home(tmp_path).mkdir(parents=True)
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    assert held == set()
+    assert invocations == []
+    assert "cannot determine token expiry" in capsys.readouterr().err
+
+
+def test_gate_dispatches_degraded_when_the_refresh_fails(
+    tmp_path: Path, monkeypatch, capsys,
+):
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=600)
+    monkeypatch.setattr(auth, "run_auth_status_command", lambda command, environment: 1)
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    # Degraded, not deadlocked: the launch still goes out on the existing token.
+    assert held == set()
+    assert "WARNING shared claude credential refresh failed" in capsys.readouterr().err
+    assert _record(tmp_path)["claude"]["outcome"] == auth.FAILED
+
+
+def test_gate_records_are_atomic_and_keep_other_harnesses(tmp_path: Path, refreshing_runner):
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=600)
+    orchestra_dir = tmp_path / ".orchestra"
+    orchestra_dir.mkdir(parents=True, exist_ok=True)
+    (orchestra_dir / "auth-refresh.json").write_text(json.dumps(
+        {"other": {"outcome": "failed", "detail": "d", "at": "2026-07-29T00:00:00+00:00"}}
+    ))
+
+    _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    records = _record(tmp_path)
+    assert set(records) == {"other", "claude"}
+    assert list(orchestra_dir.glob("auth-refresh.json.tmp")) == []

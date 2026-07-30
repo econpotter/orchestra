@@ -509,3 +509,46 @@ def test_dispatch_isolates_per_issue_launch_failure(tmp_path, monkeypatch):
     assert len(reg) == 2  # failed attempt is also durable so reconcile can classify it
     assert any(handle.pid == 0 for handle in reg.values())
     _wait_all_dead(tmp_path)
+
+
+def test_dispatch_holds_launches_of_a_harness_awaiting_credential_refresh(
+    tmp_path, monkeypatch,
+):
+    """A harness whose shared token needs a quiesced refresh launches nothing this tick."""
+    import orchestra.dispatch as d
+
+    _setup(tmp_path, _issue(1, "open"))
+    cfg = load_config(tmp_path / "config.yaml")
+    monkeypatch.setattr(
+        d, "_refresh_managed_credentials",
+        lambda root, config, reg, names, *, started: {"fake"},
+    )
+
+    assert d.dispatch(tmp_path, cfg, started="t") == []
+    assert load_registry(tmp_path / ".orchestra" / "workers.json") == {}
+
+
+def test_dispatch_refreshes_credentials_before_any_launch(tmp_path, monkeypatch):
+    """The refresh gate runs before the first launch, so no seed carries a stale token."""
+    import orchestra.dispatch as d
+
+    _setup(tmp_path, _issue(1, "open"))
+    cfg = load_config(tmp_path / "config.yaml")
+    order = []
+    real_gate = d._refresh_managed_credentials
+    real_launch = d._start_supervisor
+
+    def gate(*a, **k):
+        order.append("refresh")
+        return real_gate(*a, **k)
+
+    def launch(*a, **k):
+        order.append("launch")
+        return real_launch(*a, **k)
+
+    monkeypatch.setattr(d, "_refresh_managed_credentials", gate)
+    monkeypatch.setattr(d, "_start_supervisor", launch)
+
+    assert d.dispatch(tmp_path, cfg, started="t") == [issue_key("wf", 1)]
+    assert order == ["refresh", "launch"]
+    _wait_all_dead(tmp_path)

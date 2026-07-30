@@ -11,7 +11,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-from orchestra import git_ops, layout
+from orchestra import auth, git_ops, layout
 from orchestra.attempt import AttemptStore
 from orchestra.config import Config, validate_config
 from orchestra.enginelock import engine_lock
@@ -47,7 +47,12 @@ from orchestra.registry import (
     load_registry,
     save_registry,
 )
-from orchestra.selection import process_start_time, role_for_issue, select_dispatchable
+from orchestra.selection import (
+    process_start_time,
+    role_for_issue,
+    select_dispatchable,
+    worker_alive,
+)
 from orchestra.validate import validate_structural
 
 # The terminal status that can still be sitting in the LIVE queue. `merge_and_archive`
@@ -214,6 +219,104 @@ def build_context(
     }
 
 
+_AUTH_REFRESH_RECORD = "auth-refresh.json"
+
+
+def _harness_workers_active(
+    reg: dict[str, WorkerHandle], config: Config, harness_name: str
+) -> bool:
+    """True while any live launch of this harness could still hold a seeded access token.
+
+    Liveness, not mere registry presence: a handle whose supervisor is gone holds nothing,
+    and a stale row left behind by a crash must not block refresh forever — that would let
+    the shared token die at expiry, which is the failure this whole path exists to prevent.
+    """
+    for handle in reg.values():
+        role_cfg = config.roles.get(handle.role)
+        if role_cfg is None or role_cfg.harness != harness_name:
+            continue
+        if worker_alive(handle):
+            return True
+    return False
+
+
+def _record_auth_refresh(
+    root: Path, harness_name: str, outcome: auth.RefreshOutcome, *, at: str
+) -> None:
+    """Persist the last refresh event per harness so `orchestra status` can surface it."""
+    path = root / ".orchestra" / _AUTH_REFRESH_RECORD
+    records: dict[str, dict[str, str]] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text())
+        except ValueError:
+            loaded = None
+        if isinstance(loaded, dict):
+            records = loaded
+    records[harness_name] = {"outcome": outcome.action, "detail": outcome.detail, "at": at}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(records, indent=2, sort_keys=True))
+    os.replace(tmp, path)
+
+
+def _refresh_managed_credentials(
+    root: Path, config: Config, reg: dict[str, WorkerHandle], harness_names: set[str],
+    *, started: str,
+) -> set[str]:
+    """Keep each about-to-be-dispatched shared credential alive; return harnesses to hold.
+
+    The engine is the single writer of a managed home's OAuth token: per-launch seeds carry
+    no refresh token (`envelope._strip_refresh_token`), so nothing else can roll the chain
+    forward. This is the dispatch boundary where that happens — before any seeding, so a
+    launch never gets a token that expires mid-run.
+
+    Refresh rotates the token and REVOKES the prior access token server-side, which would
+    401 any worker still holding a seeded copy of it. So refresh only runs while the
+    harness is quiesced. When a stale-token harness still has live workers, its launches are
+    held for this tick rather than seeded with a near-dead token; the next tick, after
+    reconcile has reaped the drained workers, refreshes and resumes. Other harnesses are
+    unaffected — only the stale one is held.
+
+    A failed refresh is loud but not fatal: dispatch continues with the existing token
+    (degraded rather than deadlocked) and the failure is recorded for `orchestra status`.
+    """
+    held: set[str] = set()
+    for name in sorted(harness_names):
+        harness = config.harnesses[name]
+        if harness.kind != "claude" or harness.environment.policy != "isolated":
+            continue  # only a managed Claude home has a credential the engine owns
+        home = managed_auth_home(root, name, harness.environment.state_dir)
+        if not auth.is_stale(home, config.refresh_margin_seconds):
+            continue
+        if _harness_workers_active(reg, config, name):
+            held.add(name)
+            print(
+                f"dispatch: holding {name} launches — shared access token is within the "
+                f"{config.refresh_margin_seconds}s refresh margin and workers are still "
+                "active; refreshing once they drain",
+                file=sys.stderr,
+            )
+            _record_auth_refresh(
+                root, name,
+                auth.RefreshOutcome(auth.HELD, "waiting for active workers to drain"),
+                at=started,
+            )
+            continue
+        outcome = auth.refresh_shared_credential(
+            harness.kind, harness.executable, home,
+            margin_seconds=config.refresh_margin_seconds,
+        )
+        if outcome.action == auth.FAILED:
+            print(
+                f"dispatch: WARNING shared {name} credential refresh failed "
+                f"({outcome.detail}); dispatching with the existing token",
+                file=sys.stderr,
+            )
+        _record_auth_refresh(root, name, outcome, at=started)
+    return held
+
+
 def dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
     # Serialize engine ops so a manual dispatch/tick alongside the timer can't double-launch.
     root = Path(root)
@@ -264,6 +367,19 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
             candidates.append((project, issue, role))
 
     chosen = select_dispatchable(candidates, free)
+
+    # Refresh the shared credential before anything is seeded from it, and drop the
+    # launches of any harness that must first drain (see `_refresh_managed_credentials`).
+    held = _refresh_managed_credentials(
+        root, config, reg,
+        {config.roles[role].harness for _, _, role in chosen},
+        started=started,
+    )
+    if held:
+        chosen = [
+            candidate for candidate in chosen
+            if config.roles[candidate[2]].harness not in held
+        ]
 
     launched: list[str] = []
     # Each issue's launch is isolated: one failure (missing provider binary, bad base

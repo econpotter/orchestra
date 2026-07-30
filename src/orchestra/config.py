@@ -72,6 +72,13 @@ class Config:
     template_path: str
     merge_tmpdir: str = ""
     hold_network_issues: bool = False
+    # How much access-token lifetime must remain for dispatch to seed a launch with the
+    # shared credential. Below it, dispatch quiesces the harness and refreshes centrally
+    # (see `docs/plans/2026-07-30-worker-auth-central-refresh.md`). The default is the
+    # shipped `limits.wall_seconds` cap of 4h plus an hour of headroom for supervisor
+    # overhead and tick latency, so a token seeded at dispatch outlives the longest run
+    # a harness is allowed to have.
+    refresh_margin_seconds: int = 18000
 
 
 def _optional_bool(data: dict[str, object], key: str, *, default: bool) -> bool:
@@ -151,6 +158,7 @@ def load_config(path: str | Path) -> Config:
         template_path=template_path,
         merge_tmpdir=merge_tmpdir,
         hold_network_issues=_optional_bool(data, "hold_network_issues", default=False),
+        refresh_margin_seconds=int(data.get("refresh_margin_seconds", 18000)),
     )
 
 
@@ -161,6 +169,8 @@ _ENVIRONMENT_POLICIES = {"ambient", "isolated"}
 
 
 def validate_config(config: Config) -> None:
+    if config.refresh_margin_seconds < 0:
+        raise ValueError("config: refresh_margin_seconds must not be negative")
     for role in _REQUIRED_ROLES:
         if role not in config.roles:
             raise ValueError(f"config: required role {role!r} is missing from roles")
