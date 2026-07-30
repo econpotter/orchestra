@@ -13,6 +13,12 @@ retries_cap: 2
 # `Network: true` must be explicitly released before validation. Existing held issues remain
 # held when this is false.
 hold_network_issues: false
+# Access-token lifetime a managed Claude home must still have for dispatch to seed a launch
+# from it. Below this, dispatch holds that harness's launches until its workers drain, then
+# refreshes the shared credential centrally (the engine is the single writer of that token —
+# workers carry no refresh token). Keep it above the largest limits.wall_seconds below, so a
+# token seeded at dispatch outlives the longest run it can serve.
+refresh_margin_seconds: 18000
 harnesses:
   codex:
     kind: codex

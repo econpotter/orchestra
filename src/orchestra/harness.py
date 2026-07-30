@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from orchestra.auth import auth_status_command
+
 
 FAILURE_CATEGORIES = {
     "authentication_failure", "authentication_expired", "quota_failure", "upstream_failure",
@@ -413,11 +415,15 @@ def preflight_harness(kind: str, executable: str) -> str:
 def preflight_authentication(
     kind: str, executable: str, environment: dict[str, str]
 ) -> None:
-    """Verify non-interactive authentication where a harness exposes a safe status command."""
-    command = {
-        "codex": [executable, "login", "status"],
-        "claude": [executable, "auth", "status", "--json"],
-    }.get(kind)
+    """Verify non-interactive authentication where a harness exposes a safe status command.
+
+    The command comes from `auth` because for Claude it is also the credential *refresh
+    trigger*: defining it twice risks the two copies drifting apart. This call runs against
+    the caller's environment — at dispatch that is the private per-launch home copy, which
+    carries no refresh token, so no lock is needed. Engine-side checks against a SHARED home
+    go through `auth.run_auth_status`, which holds the credential lock.
+    """
+    command = auth_status_command(kind, executable)
     if command is None:
         return
     result = subprocess.run(

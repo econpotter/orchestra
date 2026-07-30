@@ -4,8 +4,9 @@ import os
 import subprocess
 from typing import TypeVar
 
+from orchestra.config import Config
 from orchestra.issue import Issue
-from orchestra.registry import issue_key
+from orchestra.registry import WorkerHandle, issue_key
 
 ROLE_FOR_STATUS: dict[str, str] = {
     "open": "validator",
@@ -65,6 +66,28 @@ def worker_alive(handle) -> bool:
             text=True, capture_output=True, check=False,
         )
         return result.stdout.strip() in {"active", "activating", "deactivating"}
+    return False
+
+
+def harness_workers_active(
+    reg: dict[str, WorkerHandle], config: Config, harness_name: str
+) -> bool:
+    """True while any live launch of this harness could still hold a seeded access token.
+
+    The quiescence test for central credential refresh: rotation revokes the prior access
+    token, so nothing may rotate while a worker is holding a copy of it. Both the dispatch
+    refresher and `harness doctor` (whose auth check performs the same rotation) ask this.
+
+    Liveness, not mere registry presence: a handle whose supervisor is gone holds nothing,
+    and a stale row left behind by a crash must not block refresh forever — that would let
+    the shared token die at expiry, which is the failure this path exists to prevent.
+    """
+    for handle in reg.values():
+        role_cfg = config.roles.get(handle.role)
+        if role_cfg is None or role_cfg.harness != harness_name:
+            continue
+        if worker_alive(handle):
+            return True
     return False
 
 

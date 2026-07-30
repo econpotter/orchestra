@@ -427,3 +427,26 @@ def test_validate_config_rejects_multi_agent_extra_args(extra_args):
 
     with pytest.raises(ValueError, match="delegation.*multi_agent"):
         validate_config(config)
+
+
+def test_refresh_margin_defaults_to_more_than_the_longest_allowed_run(tmp_path: Path):
+    p = tmp_path / "config.yaml"
+    p.write_text("slots: 1\nroles: {}\n")
+    # The shipped example caps a launch at limits.wall_seconds: 14400 (4h); the margin must
+    # exceed it so a token seeded at dispatch outlives the longest run it can serve.
+    assert load_config(p).refresh_margin_seconds == 18000
+    assert load_config(p).refresh_margin_seconds > 14400
+
+
+def test_refresh_margin_is_configurable(tmp_path: Path):
+    p = tmp_path / "config.yaml"
+    p.write_text("slots: 1\nroles: {}\nrefresh_margin_seconds: 900\n")
+    assert load_config(p).refresh_margin_seconds == 900
+
+
+def test_validate_rejects_a_negative_refresh_margin(tmp_path: Path):
+    from orchestra.config import validate_config
+    p = tmp_path / "config.yaml"
+    p.write_text("slots: 1\nroles: {}\nrefresh_margin_seconds: -1\n")
+    with pytest.raises(ValueError, match="refresh_margin_seconds"):
+        validate_config(load_config(p))

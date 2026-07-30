@@ -55,3 +55,22 @@ def test_summarize_running_has_started(tmp_path: Path):
     assert len(s["running"]) == 1
     assert "started" in s["running"][0]
     assert s["running"][0]["started"] == "2026-06-27T00:00:00+00:00"
+
+
+def test_summarize_surfaces_the_last_central_refresh_event(tmp_path: Path):
+    _setup(tmp_path)
+    wf = tmp_path / ".orchestra"
+    wf.mkdir(parents=True, exist_ok=True)
+    (wf / "auth-refresh.json").write_text(json.dumps(
+        {"claude": {"outcome": "held", "detail": "waiting", "at": "2026-07-30T00:00:00Z"}}
+    ))
+    assert summarize(tmp_path)["auth_refresh"]["claude"]["outcome"] == "held"
+
+
+def test_summarize_tolerates_a_missing_or_corrupt_refresh_record(tmp_path: Path):
+    _setup(tmp_path)
+    assert summarize(tmp_path)["auth_refresh"] == {}
+    wf = tmp_path / ".orchestra"
+    wf.mkdir(parents=True, exist_ok=True)
+    (wf / "auth-refresh.json").write_text("{not json")
+    assert summarize(tmp_path)["auth_refresh"] == {}

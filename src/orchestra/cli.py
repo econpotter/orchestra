@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
-from orchestra import git_ops, layout
+from orchestra import auth, git_ops, layout
 from orchestra.archive import merge_and_archive
 from orchestra.attempt import AttemptStore
 from orchestra.config import load_config
@@ -39,6 +39,7 @@ from orchestra.provenance import package_tree_digest, runtime_provenance
 from orchestra.queue import find_issue, read_queue, write_queue
 from orchestra.reconcile import reconcile as _reconcile
 from orchestra.registry import issue_key, load_registry
+from orchestra.selection import harness_workers_active
 from orchestra.scaffold import new_project
 from orchestra.workspace import WorkspaceError, resolve_workspace, save_workspace_setting
 
@@ -83,7 +84,7 @@ def _isolated_harness(root: Path, name: str):
         return None
     if harness.kind not in {"codex", "claude"} or harness.environment.policy != "isolated":
         print(
-            f"harness {name!r} setup/doctor requires isolated Codex or Claude",
+            f"harness {name!r} setup/doctor/login requires isolated Codex or Claude",
             file=sys.stderr,
         )
         return None
@@ -92,14 +93,20 @@ def _isolated_harness(root: Path, name: str):
         root, name, harness, adapter.capabilities, home=Path.home(),
         instruction_policy="explicit_bundle" if harness.kind == "claude" else "native_project",
     )
-    return harness, envelope
+    return config, harness, envelope
+
+
+def _login_argv(kind: str) -> list[str]:
+    """The harness CLI's interactive login subcommand — one definition shared by
+    `harness setup` (which only prints it) and `harness login` (which runs it)."""
+    return ["login"] if kind == "codex" else ["auth", "login"]
 
 
 def cmd_harness_setup(args: argparse.Namespace) -> int:
     resolved = _isolated_harness(Path(args.root), args.name)
     if resolved is None:
         return 2
-    harness, envelope = resolved
+    _config, harness, envelope = resolved
     variable = "CODEX_HOME" if harness.kind == "codex" else "CLAUDE_CONFIG_DIR"
     state_dir = Path(dict(envelope.environment)[variable])
     try:
@@ -125,7 +132,7 @@ def cmd_harness_setup(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"could not prepare isolated {harness.kind} state directory: {exc}", file=sys.stderr)
         return 1
-    login_argv = "login" if harness.kind == "codex" else "auth login"
+    login_argv = " ".join(_login_argv(harness.kind))
     print(
         f"{variable}={shlex.quote(str(state_dir))} "
         f"{shlex.quote(harness.executable)} {login_argv}"
@@ -133,11 +140,54 @@ def cmd_harness_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_harness_login(args: argparse.Namespace) -> int:
+    resolved = _isolated_harness(Path(args.root), args.name)
+    if resolved is None:
+        return 2
+    config, harness, envelope = resolved
+    variable = "CODEX_HOME" if harness.kind == "codex" else "CLAUDE_CONFIG_DIR"
+    state_dir = Path(dict(envelope.environment)[variable])
+    if not state_dir.is_dir():
+        print(
+            f"harness {args.name!r} has no isolated home yet at {state_dir}; "
+            f"run `orchestra harness setup {args.name}` first",
+            file=sys.stderr,
+        )
+        return 2
+
+    active = harness_workers_active(
+        load_registry(Path(args.root) / ".orchestra" / "workers.json"), config, args.name,
+    )
+    if active:
+        warning = (
+            f"harness {args.name!r} has active workers; logging in rotates the shared "
+            "credential and revokes the token they are holding, which 401s them mid-run"
+        )
+        if not args.force:
+            print(f"{warning} — pass --force to proceed anyway", file=sys.stderr)
+            return 2
+        print(f"{warning} — proceeding because --force was given", file=sys.stderr)
+
+    argv = [harness.executable, *_login_argv(harness.kind)]
+    environment = auth.shared_home_environment(harness.kind, state_dir)
+    try:
+        # A file lock around a login the operator drives interactively: it serializes this
+        # rewrite of the shared credential against the dispatch refresher and `harness
+        # doctor` (both of which take the same lock), without touching the child's stdio —
+        # the lock lives in the parent process, the login subprocess still has the terminal.
+        with auth.credential_lock(state_dir):
+            result = subprocess.run(argv, env=environment)
+    except OSError as exc:
+        print(f"could not run {shlex.join(argv)}: {exc}", file=sys.stderr)
+        return 1
+    return result.returncode
+
+
 def cmd_harness_doctor(args: argparse.Namespace) -> int:
     resolved = _isolated_harness(Path(args.root), args.name)
     if resolved is None:
         return 2
-    harness, envelope = resolved
+    config, harness, envelope = resolved
     variable = "CODEX_HOME" if harness.kind == "codex" else "CLAUDE_CONFIG_DIR"
     state_dir = Path(dict(envelope.environment)[variable])
     state_dir_exists = state_dir.is_dir()
@@ -156,22 +206,68 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
     if state_dir_exists and state_dir_writable and executable and preflight == "passed":
         environment = os.environ.copy()
         environment.update(dict(envelope.environment))
-        try:
-            login_command = (
-                [harness.executable, "login", "status"] if harness.kind == "codex"
-                else [harness.executable, "auth", "status", "--json"]
+        # Doctor's login check runs against the SHARED home, and for Claude the check
+        # command *is* the refresh trigger: past or near expiry it rotates and persists the
+        # credential, revoking the prior access token. So it may only run when the dispatch
+        # refresher itself would be allowed to run.
+        #
+        # Quiescence first: rotating while workers hold a seeded copy of the current token
+        # 401s every one of them mid-run. The operator flow this protects is the obvious one
+        # — `status` reports a held refresh, the operator runs `doctor` to find out why.
+        # Only relevant inside the refresh margin: outside it the CLI has nothing to rotate,
+        # so doctor stays usable during ordinary operation, which is when it is needed.
+        # Then the lock, so doctor cannot race a dispatch that is refreshing or seeding.
+        if (
+            harness.kind == "claude"
+            and auth.is_stale(state_dir, config.refresh_margin_seconds)
+            and harness_workers_active(
+                load_registry(Path(args.root) / ".orchestra" / "workers.json"),
+                config, args.name,
             )
-            result = subprocess.run(
-                login_command,
-                text=True,
-                capture_output=True,
-                timeout=15,
-                check=False,
-                env=environment,
-            )
-            login = "authenticated" if result.returncode == 0 else "not_authenticated"
-        except (OSError, subprocess.SubprocessError):
-            login = "not_authenticated"
+        ):
+            login = "not_checked_workers_active"
+        else:
+            login = "authenticated" if auth.run_auth_status(
+                harness.kind, harness.executable, state_dir, environment
+            ) else "not_authenticated"
+
+    # Expiry readout and revocation probe are Claude-specific (the credential shape and the
+    # probe endpoint are both the Claude OAuth home's). File reads never mutate anything, so
+    # they run regardless of `login`; the probe is a live HTTPS call, so it only runs once
+    # the auth-status path above has actually run (`login` is "authenticated" or
+    # "not_authenticated") — never in the not_checked_workers_active refusal path (rotation
+    # is what's being avoided there, and freshness is unknown), and never when `--no-probe`
+    # asks for zero network access.
+    access_at, access_days = (None, None)
+    refresh_at, refresh_days = (None, None)
+    refresh_warning = False
+    probe = "not_applicable"
+    if harness.kind == "claude":
+        access_at, access_days = auth.describe_expiry(auth.access_expiry(state_dir))
+        refresh_at, refresh_days = auth.describe_expiry(auth.refresh_expiry(state_dir))
+        refresh_warning = refresh_days is not None and refresh_days < auth.REFRESH_WARNING_DAYS
+        if args.no_probe:
+            probe = "disabled"
+        elif login in ("authenticated", "not_authenticated"):
+            probe = auth.probe_shared_credential(state_dir)
+        elif login == "not_checked_workers_active":
+            probe = "skipped_workers_active"
+        else:
+            probe = "not_checked"
+
+    if refresh_warning:
+        print(
+            f"WARNING: harness {args.name!r} refresh token expires in "
+            f"{refresh_days:.1f} day(s) (< {auth.REFRESH_WARNING_DAYS}-day threshold); "
+            "re-authenticate soon with `orchestra harness login claude`.",
+            file=sys.stderr,
+        )
+    if probe == auth.REVOKED:
+        print(
+            f"harness {args.name!r}: the access token has been revoked server-side; "
+            "run `orchestra harness login claude` to re-authenticate.",
+            file=sys.stderr,
+        )
 
     instructions = "not_configured"
     if harness.kind == "codex" and harness.environment.instructions_file:
@@ -191,7 +287,7 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
 
     ready = all((state_dir_exists, state_dir_writable, executable, preflight == "passed",
                  state_dir_private, login == "authenticated",
-                 instructions in {"not_configured", "current"}))
+                 instructions in {"not_configured", "current"}, probe != auth.REVOKED))
     report = {
         "name": args.name,
         "kind": harness.kind,
@@ -204,6 +300,12 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
         "version": version,
         "preflight": preflight,
         "login": login,
+        "access_token_expires_at": access_at,
+        "access_token_expires_in_days": access_days,
+        "refresh_token_expires_at": refresh_at,
+        "refresh_token_expires_in_days": refresh_days,
+        "refresh_token_warning": refresh_warning,
+        "probe": probe,
         "instructions": instructions,
         "ready": ready,
     }
@@ -380,6 +482,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     else:
         print(f"slots used: {s['slots_used']}")
         print("counts: " + ", ".join(f"{k}={v}" for k, v in sorted(s["counts"].items())))
+        for name, record in sorted(s["auth_refresh"].items()):
+            if record.get("outcome") in {auth.FAILED, auth.HELD}:
+                print(
+                    f"auth: {name} refresh {record['outcome']} at {record.get('at', '')} "
+                    f"— {record.get('detail', '')}"
+                )
         for row in s["issues"]:
             _print_issue_row(row)
     return 0
@@ -852,7 +960,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_harness_doctor.add_argument("name")
     p_harness_doctor.add_argument("--json", action="store_true")
+    p_harness_doctor.add_argument(
+        "--no-probe", action="store_true",
+        help="skip the Claude revocation probe (no network access)",
+    )
     p_harness_doctor.set_defaults(func=cmd_harness_doctor)
+    p_harness_login = harness_sub.add_parser(
+        "login", help="run the isolated-home login flow interactively"
+    )
+    p_harness_login.add_argument("name")
+    p_harness_login.add_argument(
+        "--force", action="store_true",
+        help="log in even while workers of this harness are active "
+             "(rotates the shared credential and 401s their in-flight token)",
+    )
+    p_harness_login.set_defaults(func=cmd_harness_login)
 
     p_engine = sub.add_parser("engine", help="diagnose the installed Orchestra engine")
     engine_sub = p_engine.add_subparsers(dest="engine_command", required=True)

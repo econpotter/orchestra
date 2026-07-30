@@ -509,3 +509,206 @@ def test_dispatch_isolates_per_issue_launch_failure(tmp_path, monkeypatch):
     assert len(reg) == 2  # failed attempt is also durable so reconcile can classify it
     assert any(handle.pid == 0 for handle in reg.values())
     _wait_all_dead(tmp_path)
+
+
+def test_dispatch_holds_launches_of_a_harness_awaiting_credential_refresh(
+    tmp_path, monkeypatch,
+):
+    """A harness whose shared token needs a quiesced refresh launches nothing this tick."""
+    import orchestra.dispatch as d
+
+    _setup(tmp_path, _issue(1, "open"))
+    cfg = load_config(tmp_path / "config.yaml")
+    monkeypatch.setattr(
+        d, "_refresh_managed_credentials",
+        lambda root, config, reg, names, *, started: {"fake"},
+    )
+
+    assert d.dispatch(tmp_path, cfg, started="t") == []
+    assert load_registry(tmp_path / ".orchestra" / "workers.json") == {}
+
+
+def test_dispatch_refreshes_credentials_before_any_launch(tmp_path, monkeypatch):
+    """The refresh gate runs before the first launch, so no seed carries a stale token."""
+    import orchestra.dispatch as d
+
+    _setup(tmp_path, _issue(1, "open"))
+    cfg = load_config(tmp_path / "config.yaml")
+    order = []
+    real_gate = d._refresh_managed_credentials
+    real_launch = d._start_supervisor
+
+    def gate(*a, **k):
+        order.append("refresh")
+        return real_gate(*a, **k)
+
+    def launch(*a, **k):
+        order.append("launch")
+        return real_launch(*a, **k)
+
+    monkeypatch.setattr(d, "_refresh_managed_credentials", gate)
+    monkeypatch.setattr(d, "_start_supervisor", launch)
+
+    assert d.dispatch(tmp_path, cfg, started="t") == [issue_key("wf", 1)]
+    assert order == ["refresh", "launch"]
+    _wait_all_dead(tmp_path)
+
+
+ISOLATED_CONFIG = CONFIG.replace(
+    "    preflight: false\n",
+    "    preflight: false\n"
+    "    environment: {policy: isolated, state_dir: .orchestra/homes/fake}\n",
+)
+
+
+def _shared_credential(root: Path, access_token: str) -> Path:
+    home = root / ".orchestra" / "homes" / "fake"
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / ".credentials.json"
+    path.write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": access_token, "refreshToken": "shared-refresh-token",
+        "expiresAt": int((time.time() + 40000) * 1000),
+        "refreshTokenExpiresAt": int((time.time() + 30 * 86400) * 1000),
+    }}))
+    return home
+
+
+def test_dispatch_seeds_the_launch_home_under_the_credential_lock(tmp_path, monkeypatch):
+    """`harness doctor` holds only the credential lock, so a rotation could otherwise land
+    mid-copy and seed a torn or already-revoked credential."""
+    import fcntl
+
+    from orchestra import auth
+    import orchestra.dispatch as d
+
+    _setup(tmp_path, _issue(1, "open"))
+    (tmp_path / "config.yaml").write_text(ISOLATED_CONFIG)
+    source_home = _shared_credential(tmp_path, "shared-access-token")
+    cfg = load_config(tmp_path / "config.yaml")
+    observed = {}
+    real_seed = d.seed_session_home
+
+    def seeding(seed_home, session_home):
+        contender = open(auth._lock_path(source_home), "w")
+        try:
+            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            observed["locked"] = False
+        except BlockingIOError:
+            observed["locked"] = True
+        finally:
+            contender.close()
+        return real_seed(seed_home, session_home)
+
+    monkeypatch.setattr(d, "seed_session_home", seeding)
+
+    assert d.dispatch(tmp_path, cfg, started="t") == [issue_key("wf", 1)]
+    assert observed["locked"] is True
+    _wait_all_dead(tmp_path)
+
+
+def test_dispatch_defers_the_launch_when_the_seed_time_lock_is_contended(
+    tmp_path, monkeypatch,
+):
+    """An operator-driven `harness doctor`/`harness login` can hold the credential lock for
+    as long as their terminal session takes. Dispatch must not stall the whole engine tick
+    behind it — contention defers just this launch to the next tick. Run in a thread with a
+    timeout so a regression to blocking behavior fails the test instead of hanging it."""
+    import fcntl
+    import threading
+
+    from orchestra import auth
+    import orchestra.dispatch as d
+
+    _setup(tmp_path, _issue(1, "open"))
+    (tmp_path / "config.yaml").write_text(ISOLATED_CONFIG)
+    source_home = _shared_credential(tmp_path, "shared-access-token")
+    cfg = load_config(tmp_path / "config.yaml")
+
+    holder = open(auth._lock_path(source_home), "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    result: dict = {}
+
+    def run():
+        result["launched"] = d.dispatch(tmp_path, cfg, started="t")
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(timeout=5)
+    still_blocked = thread.is_alive()
+    holder.close()
+    if still_blocked:
+        thread.join(timeout=5)
+
+    assert not still_blocked, "dispatch blocked on the contended credential lock at seed time"
+    assert result["launched"] == []
+    assert load_registry(tmp_path / ".orchestra" / "workers.json") == {}
+
+
+def test_dispatch_launches_on_the_next_tick_once_the_seed_time_lock_frees(
+    tmp_path, monkeypatch,
+):
+    """Deferring must not be a dead end: once the contending writer releases the lock, the
+    next tick launches normally."""
+    import fcntl
+
+    from orchestra import auth
+    import orchestra.dispatch as d
+
+    _setup(tmp_path, _issue(1, "open"))
+    (tmp_path / "config.yaml").write_text(ISOLATED_CONFIG)
+    source_home = _shared_credential(tmp_path, "shared-access-token")
+    cfg = load_config(tmp_path / "config.yaml")
+
+    holder = open(auth._lock_path(source_home), "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    first = d.dispatch(tmp_path, cfg, started="t1")
+    holder.close()
+
+    assert first == []
+    assert load_registry(tmp_path / ".orchestra" / "workers.json") == {}
+
+    second = d.dispatch(tmp_path, cfg, started="t2")
+    assert second == [issue_key("wf", 1)]
+    _wait_all_dead(tmp_path)
+
+
+def test_resume_seeds_the_parents_session_state_with_the_shared_token(tmp_path):
+    """A resumed launch inherits the parent's transcript but NOT its aged access token:
+    a per-launch copy has no refresh token, so its token only ages while the shared one is
+    kept alive centrally."""
+    from orchestra.attempt import AttemptStore
+    from orchestra.envelope import session_state_home
+    import orchestra.dispatch as d
+
+    _setup(tmp_path, _issue(1, "open"))
+    (tmp_path / "config.yaml").write_text(ISOLATED_CONFIG)
+    _shared_credential(tmp_path, "shared-access-token")
+    cfg = load_config(tmp_path / "config.yaml")
+
+    store = AttemptStore(tmp_path)
+    parent = store.create(
+        attempt_id="wf-001-validator-parent", project="wf", number=1, role="validator",
+        harness="codex", model="m", worktree=tmp_path, branch="issue/001-t",
+        start_commit="", prompt="p", instruction_bundle="i", configuration={},
+        capabilities={}, parent_attempt=None,
+    )
+    store.update(parent, retry_disposition="resume", session_id="session-1")
+    parent_home = session_state_home(tmp_path, "fake", parent.attempt_id)
+    parent_home.mkdir(parents=True)
+    (parent_home / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": "aged-parent-access-token",
+        "expiresAt": int((time.time() + 60) * 1000),
+    }}))
+    (parent_home / "projects").mkdir()
+    (parent_home / "projects" / "session-1.jsonl").write_text('{"transcript": true}\n')
+
+    assert d.dispatch(tmp_path, cfg, started="t") == [issue_key("wf", 1)]
+    reg = load_registry(tmp_path / ".orchestra" / "workers.json")
+    session_home = session_state_home(tmp_path, "fake", reg[issue_key("wf", 1)].attempt_id)
+    oauth = json.loads((session_home / ".credentials.json").read_text())["claudeAiOauth"]
+
+    assert oauth["accessToken"] == "shared-access-token"   # not the parent's aged one
+    assert "refreshToken" not in oauth                     # stripped, as on any seed
+    assert (session_home / "projects" / "session-1.jsonl").exists()   # transcript kept
+    assert not parent_home.exists()                        # parent home consumed
+    _wait_all_dead(tmp_path)

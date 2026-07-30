@@ -11,7 +11,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-from orchestra import git_ops, layout
+from orchestra import auth, git_ops, layout
 from orchestra.attempt import AttemptStore
 from orchestra.config import Config, validate_config
 from orchestra.enginelock import engine_lock
@@ -27,6 +27,7 @@ from orchestra.envelope import (
     build_execution_envelope,
     execution_envelope_fingerprint,
     managed_auth_home,
+    reseed_credentials,
     seed_session_home,
     session_state_home,
 )
@@ -47,7 +48,12 @@ from orchestra.registry import (
     load_registry,
     save_registry,
 )
-from orchestra.selection import process_start_time, role_for_issue, select_dispatchable
+from orchestra.selection import (
+    harness_workers_active,
+    process_start_time,
+    role_for_issue,
+    select_dispatchable,
+)
 from orchestra.validate import validate_structural
 
 # The terminal status that can still be sitting in the LIVE queue. `merge_and_archive`
@@ -214,6 +220,133 @@ def build_context(
     }
 
 
+_AUTH_REFRESH_RECORD = "auth-refresh.json"
+
+
+def _record_auth_refresh(
+    root: Path, harness_name: str, outcome: auth.RefreshOutcome, *, at: str
+) -> None:
+    """Persist the last refresh event per harness so `orchestra status` can surface it."""
+    path = root / ".orchestra" / _AUTH_REFRESH_RECORD
+    records: dict[str, dict[str, str]] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text())
+        except ValueError:
+            loaded = None
+        if isinstance(loaded, dict):
+            records = loaded
+    records[harness_name] = {"outcome": outcome.action, "detail": outcome.detail, "at": at}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(records, indent=2, sort_keys=True))
+    os.replace(tmp, path)
+
+
+def _refresh_managed_credentials(
+    root: Path, config: Config, reg: dict[str, WorkerHandle], harness_names: set[str],
+    *, started: str,
+) -> set[str]:
+    """Keep each about-to-be-dispatched shared credential alive; return harnesses to hold.
+
+    The engine is the single writer of a managed home's OAuth token: per-launch seeds carry
+    no refresh token (`envelope._strip_refresh_token`), so nothing else can roll the chain
+    forward. This is the dispatch boundary where that happens — before any seeding, so a
+    launch never gets a token that expires mid-run.
+
+    Refresh rotates the token and REVOKES the prior access token server-side, which would
+    401 any worker still holding a seeded copy of it. So refresh only runs while the
+    harness is quiesced. When a stale-token harness still has live workers, its launches are
+    held for this tick rather than seeded with a near-dead token; the next tick, after
+    reconcile has reaped the drained workers, refreshes and resumes. Other harnesses are
+    unaffected — only the stale one is held.
+
+    A failed refresh is loud but not fatal *while the existing token still works*: dispatch
+    continues on it (degraded rather than deadlocked) and the failure is recorded for
+    `orchestra status`. If the refresh failed and the access token is already expired, the
+    harness is held instead. Dispatching then would fail authentication preflight, and
+    `authentication_failure` is a blocking outcome (`outcome.decide_attempt`) — so
+    "degraded" would quietly become "every issue in the queue blocked" for a condition only
+    a re-login fixes. Holding keeps the queue intact and retries the refresh each tick.
+
+    The same holds for a home that cannot even be resolved or locked — one misconfigured
+    harness must not crash the tick and skip reconcile for every other project.
+
+    The credential lock is taken non-blocking (`refresh_shared_credential(...,
+    blocking=False)`): an operator-driven `harness doctor`/`harness login` can hold it for as
+    long as their terminal session takes, and this gate runs on every dispatch tick, so it
+    must never wait — contention holds the harness for this tick (retried next tick) exactly
+    like the "workers still active" case above, rather than stalling the whole engine.
+    """
+    held: set[str] = set()
+    for name in sorted(harness_names):
+        harness = config.harnesses[name]
+        if harness.kind != "claude" or harness.environment.policy != "isolated":
+            continue  # only a managed Claude home has a credential the engine owns
+        try:
+            home = managed_auth_home(root, name, harness.environment.state_dir)
+            if not auth.is_stale(home, config.refresh_margin_seconds):
+                continue
+            if harness_workers_active(reg, config, name):
+                held.add(name)
+                print(
+                    f"dispatch: holding {name} launches — shared access token is within "
+                    f"the {config.refresh_margin_seconds}s refresh margin and workers are "
+                    "still active; refreshing once they drain",
+                    file=sys.stderr,
+                )
+                _record_auth_refresh(
+                    root, name,
+                    auth.RefreshOutcome(auth.HELD, "waiting for active workers to drain"),
+                    at=started,
+                )
+                continue
+            outcome = auth.refresh_shared_credential(
+                harness.kind, harness.executable, home,
+                margin_seconds=config.refresh_margin_seconds, blocking=False,
+            )
+            if outcome.action == auth.HELD:
+                held.add(name)
+                print(
+                    f"dispatch: holding {name} launches — credential lock is held by "
+                    "another writer (doctor or login in progress); retrying next tick",
+                    file=sys.stderr,
+                )
+                _record_auth_refresh(root, name, outcome, at=started)
+                continue
+            if outcome.action == auth.FAILED:
+                # `margin_seconds=0` asks the narrower question "is the token dead *now*",
+                # not "is it inside the dispatch margin".
+                if auth.is_stale(home, 0):
+                    held.add(name)
+                    outcome = auth.RefreshOutcome(
+                        auth.FAILED,
+                        f"{outcome.detail}; access token is expired — holding {name} "
+                        f"dispatches until a refresh succeeds or the home is re-authenticated "
+                        f"(orchestra harness login {name})",
+                    )
+                    print(
+                        f"dispatch: WARNING shared {name} credential refresh failed and the "
+                        f"access token is expired ({outcome.detail}); holding {name} "
+                        "dispatches rather than blocking every issue on preflight",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"dispatch: WARNING shared {name} credential refresh failed "
+                        f"({outcome.detail}); dispatching with the existing token",
+                        file=sys.stderr,
+                    )
+            _record_auth_refresh(root, name, outcome, at=started)
+        except (OSError, ValueError) as exc:
+            print(
+                f"dispatch: WARNING central refresh for {name} could not run ({exc}); "
+                "dispatching with the existing token",
+                file=sys.stderr,
+            )
+    return held
+
+
 def dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
     # Serialize engine ops so a manual dispatch/tick alongside the timer can't double-launch.
     root = Path(root)
@@ -264,6 +397,19 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
             candidates.append((project, issue, role))
 
     chosen = select_dispatchable(candidates, free)
+
+    # Refresh the shared credential before anything is seeded from it, and drop the
+    # launches of any harness that must first drain (see `_refresh_managed_credentials`).
+    held = _refresh_managed_credentials(
+        root, config, reg,
+        {config.roles[role].harness for _, _, role in chosen},
+        started=started,
+    )
+    if held:
+        chosen = [
+            candidate for candidate in chosen
+            if config.roles[candidate[2]].harness not in held
+        ]
 
     launched: list[str] = []
     # Each issue's launch is isolated: one failure (missing provider binary, bad base
@@ -402,9 +548,13 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                     source_home = managed_auth_home(
                         root, role_cfg.harness, harness.environment.state_dir
                     )
-                    # A resume must inherit the parent launch's session state (transcript +
-                    # its already-refreshed token), so seed from the parent's home; the parent
-                    # is finalized (sequential), so there is no concurrent writer to clobber.
+                    # A resume must inherit the parent launch's session state (its
+                    # transcript), so seed from the parent's home; the parent is finalized
+                    # (sequential), so there is no concurrent writer to clobber. Its
+                    # CREDENTIAL, however, is the oldest one around — a per-launch copy has
+                    # no refresh token, so its access token only ages — and a resume is the
+                    # long-run case the margin exists for. Take the transcript from the
+                    # parent and the token from the shared home.
                     seed_home = source_home
                     if attempt_config["resume_session"] and retry_parent is not None:
                         parent_home = session_state_home(
@@ -412,9 +562,27 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                         )
                         if parent_home.is_dir():
                             seed_home = parent_home
-                    seed_session_home(seed_home, session_home)
-                    if seed_home != source_home:
-                        shutil.rmtree(seed_home, ignore_errors=True)  # consumed the parent home
+                    # Under the credential lock: `harness doctor` takes only this lock (not
+                    # the engine lock), so without it a rotation could land mid-copy and seed
+                    # a torn or already-revoked credential. Non-blocking: an operator-driven
+                    # `harness doctor`/`harness login` can hold this lock for as long as their
+                    # terminal session takes, and this runs on every dispatch tick under the
+                    # engine lock — it must never wait. Contention defers only THIS launch
+                    # (caught by the per-issue handler below, same as any other launch
+                    # failure); the issue was never added to the registry, so the next tick
+                    # simply retries it once the lock frees.
+                    with auth.credential_lock(source_home, blocking=False) as acquired:
+                        if not acquired:
+                            raise RuntimeError(
+                                f"credential lock for {role_cfg.harness} is held by another "
+                                "writer (doctor or login in progress); deferring this launch "
+                                "to the next tick"
+                            )
+                        seed_session_home(seed_home, session_home)
+                        if seed_home != source_home:
+                            reseed_credentials(source_home, session_home)
+                            # consumed the parent home
+                            shutil.rmtree(seed_home, ignore_errors=True)
                 attempt_config["execution_envelope"] = asdict(envelope)
                 instruction_setup_error = ""
                 if harness.kind == "codex" and harness.environment.instructions_file:

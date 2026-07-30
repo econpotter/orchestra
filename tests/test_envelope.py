@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -202,6 +203,129 @@ def test_unauthenticated_source_seeds_unauthenticated_launch_home(tmp_path: Path
     assert not (session / ".credentials.json").exists()
 
 
+def _credential_json(refresh_token: str = "operator-refresh-token") -> dict:
+    # Shape confirmed by the Task 1 spike note
+    # (docs/notes/2026-07-30-refresh-trigger-spike.md): keys only, no real values.
+    return {
+        "claudeAiOauth": {
+            "accessToken": "operator-access-token",
+            "refreshToken": refresh_token,
+            "expiresAt": 1785449770979,
+            "refreshTokenExpiresAt": 1787988703979,
+            "scopes": ["user:profile", "user:inference"],
+            "subscriptionType": "max",
+            "rateLimitTier": "default_claude_max_20x",
+        }
+    }
+
+
+def test_seed_strips_refresh_token_but_preserves_sibling_fields_and_files(tmp_path: Path):
+    # #014-2: a worker refreshing from a seeded refresh token rotates and revokes the
+    # fleet's shared token server-side. The per-launch copy must not carry one.
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    (source / ".credentials.json").write_text(json.dumps(_credential_json()))
+    (source / "shell-snapshots").mkdir()
+    (source / "shell-snapshots" / "snap.sh").write_text("#!/bin/sh\necho hi\n")
+    session = session_state_home(tmp_path, "claude", "attempt-strip")
+
+    seed_session_home(source, session)
+
+    seeded = json.loads((session / ".credentials.json").read_text())
+    oauth = seeded["claudeAiOauth"]
+    assert "refreshToken" not in oauth
+    assert oauth["accessToken"] == "operator-access-token"
+    assert oauth["expiresAt"] == 1785449770979
+    assert oauth["refreshTokenExpiresAt"] == 1787988703979
+    assert oauth["scopes"] == ["user:profile", "user:inference"]
+    assert oauth["subscriptionType"] == "max"
+    assert oauth["rateLimitTier"] == "default_claude_max_20x"
+    # A sibling file untouched by the strip is copied byte-identical.
+    assert (session / "shell-snapshots" / "snap.sh").read_text() == "#!/bin/sh\necho hi\n"
+
+
+def test_seed_strips_refresh_token_from_stale_nested_claude_credentials_copy(tmp_path: Path):
+    # The spike found a stale duplicate at .claude/.credentials.json inside the shared
+    # home; if a seed carries that duplicate forward it must be stripped too.
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    (source / ".claude").mkdir(parents=True)
+    (source / ".credentials.json").write_text(json.dumps(_credential_json("top-level-refresh")))
+    (source / ".claude" / ".credentials.json").write_text(
+        json.dumps(_credential_json("nested-stale-refresh"))
+    )
+    session = session_state_home(tmp_path, "claude", "attempt-nested")
+
+    seed_session_home(source, session)
+
+    top = json.loads((session / ".credentials.json").read_text())
+    nested = json.loads((session / ".claude" / ".credentials.json").read_text())
+    assert "refreshToken" not in top["claudeAiOauth"]
+    assert "refreshToken" not in nested["claudeAiOauth"]
+    assert top["claudeAiOauth"]["accessToken"] == "operator-access-token"
+    assert nested["claudeAiOauth"]["accessToken"] == "operator-access-token"
+
+
+def test_seed_leaves_malformed_credential_json_untouched(tmp_path: Path):
+    # Malformed JSON must not crash the launch; the worker will fail auth on its own
+    # and that failure is visible, which is a better failure mode than a crashed seed.
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    (source / ".credentials.json").write_text("not valid json{")
+    session = session_state_home(tmp_path, "claude", "attempt-malformed")
+
+    seed_session_home(source, session)
+
+    assert (session / ".credentials.json").read_text() == "not valid json{"
+
+
+def test_seed_leaves_non_dict_top_level_json_untouched(tmp_path: Path):
+    # Regression: valid JSON whose top level is not an object (list, string, number,
+    # bool, null) must not crash the seed via AttributeError on `.get` — it is
+    # "malformed" from the credential schema's point of view and must be left alone.
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    (source / ".credentials.json").write_text("[1, 2, 3]")
+    session = session_state_home(tmp_path, "claude", "attempt-non-dict")
+
+    seed_session_home(source, session)
+
+    assert (session / ".credentials.json").read_text() == "[1, 2, 3]"
+
+
+def test_seed_preserves_unknown_fields_at_top_level_and_inside_oauth(tmp_path: Path):
+    # The brief requires preserving unknown keys, not just the documented schema
+    # fields: one at the top level (sibling of claudeAiOauth) and one nested inside
+    # claudeAiOauth itself must both survive the strip untouched.
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    credential = _credential_json()
+    credential["claudeAiOauth"]["futureOauthField"] = "unknown-oauth-value"
+    credential["futureTopLevelField"] = "unknown-top-level-value"
+    (source / ".credentials.json").write_text(json.dumps(credential))
+    session = session_state_home(tmp_path, "claude", "attempt-unknown-fields")
+
+    seed_session_home(source, session)
+
+    seeded = json.loads((session / ".credentials.json").read_text())
+    assert "refreshToken" not in seeded["claudeAiOauth"]
+    assert seeded["claudeAiOauth"]["futureOauthField"] == "unknown-oauth-value"
+    assert seeded["futureTopLevelField"] == "unknown-top-level-value"
+
+
+def test_seed_without_credential_file_still_seeds_other_files(tmp_path: Path):
+    # A home without a credential file must seed exactly as before this change: no
+    # crash, no file conjured up, other content copied normally.
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    (source / "settings.json").write_text('{"theme": "dark"}')
+    session = session_state_home(tmp_path, "claude", "attempt-no-credential")
+
+    seed_session_home(source, session)
+
+    assert not (session / ".credentials.json").exists()
+    assert (session / "settings.json").read_text() == '{"theme": "dark"}'
+
+
 def test_isolated_state_directory_must_be_workspace_managed(tmp_path: Path):
     harness = HarnessConfig(
         kind="codex", executable="codex",
@@ -211,3 +335,52 @@ def test_isolated_state_directory_must_be_workspace_managed(tmp_path: Path):
         build_execution_envelope(
             tmp_path, "codex", harness, {}, home=tmp_path / "home"
         )
+
+
+def test_reseed_credentials_takes_the_shared_token_and_keeps_the_session_state(
+    tmp_path: Path,
+):
+    """A resume seeds from the parent's home for its transcript, but the parent's access
+    token only ages (no refresh token to roll it forward), so the credential is replaced
+    from the shared home and re-stripped."""
+    from orchestra.envelope import reseed_credentials
+
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    fresh = _credential_json()
+    fresh["claudeAiOauth"]["accessToken"] = "freshly-refreshed-access-token"
+    (source / ".credentials.json").write_text(json.dumps(fresh))
+    parent = session_state_home(tmp_path, "claude", "attempt-parent")
+    parent.mkdir(parents=True)
+    aged = _credential_json()
+    aged["claudeAiOauth"]["accessToken"] = "aged-parent-access-token"
+    (parent / ".credentials.json").write_text(json.dumps(aged))
+    (parent / "projects").mkdir()
+    (parent / "projects" / "session.jsonl").write_text('{"transcript": true}\n')
+    session = session_state_home(tmp_path, "claude", "attempt-resume")
+
+    seed_session_home(parent, session)
+    reseed_credentials(source, session)
+
+    oauth = json.loads((session / ".credentials.json").read_text())["claudeAiOauth"]
+    assert oauth["accessToken"] == "freshly-refreshed-access-token"
+    assert "refreshToken" not in oauth          # stripped again, as on any seed
+    # The resume's whole point — the parent's session transcript — survives.
+    assert (session / "projects" / "session.jsonl").read_text() == '{"transcript": true}\n'
+
+
+def test_reseed_credentials_leaves_the_seed_alone_when_the_source_has_none(tmp_path: Path):
+    from orchestra.envelope import reseed_credentials
+
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    parent = session_state_home(tmp_path, "claude", "attempt-parent-2")
+    parent.mkdir(parents=True)
+    (parent / ".credentials.json").write_text(json.dumps(_credential_json()))
+    session = session_state_home(tmp_path, "claude", "attempt-resume-2")
+
+    seed_session_home(parent, session)
+    reseed_credentials(source, session)
+
+    oauth = json.loads((session / ".credentials.json").read_text())["claudeAiOauth"]
+    assert oauth["accessToken"] == "operator-access-token"

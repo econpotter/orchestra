@@ -121,7 +121,7 @@ successful doctor report before resuming unattended dispatch:
 
 ```sh
 orchestra harness setup codex
-# Run the exact CODEX_HOME=... codex login command that setup prints.
+orchestra harness login codex   # runs the CODEX_HOME=... codex login command interactively
 orchestra harness doctor codex
 ```
 
@@ -148,14 +148,31 @@ harnesses:
 Set `roles.<role>.harness: claude`, `roles.<role>.instruction_policy: explicit_bundle`, and
 choose the corresponding Claude model. Isolated Claude uses `--safe-mode`, disabling native
 customization and instruction discovery while Orchestra supplies the recorded project bundle
-exactly once. Run `orchestra harness setup claude`, authenticate with the printed
-`CLAUDE_CONFIG_DIR=... claude auth login` command, and require `orchestra harness doctor claude`
-to pass. The dedicated config directory plus the outer home mask prevents personal plugins,
-skills, integrations, and sessions from entering the run. The adapter preflights the installed
-CLI and fails loudly if required protocol
+exactly once. Run `orchestra harness setup claude`, then `orchestra harness login claude` to run
+that setup's printed `CLAUDE_CONFIG_DIR=... claude auth login` command interactively, and require
+`orchestra harness doctor claude` to pass. `harness login` refuses if `setup` has not been run
+yet, if the harness is unknown or not isolated, and — unless passed `--force` — while any worker
+of that harness is active, since login rotates the shared credential and would 401 an in-flight
+run. The dedicated config directory plus the outer home mask prevents personal plugins, skills,
+integrations, and sessions from entering the run. The adapter preflights the installed CLI and
+fails loudly if required protocol
 flags are missing. The `danger-full-access` setting is appropriate only inside an execution
 boundary you trust;
 enable the workspace's outer `sandbox` when filesystem confinement is required.
+
+Orchestra is the single writer of that dedicated directory's OAuth token. Each launch is
+seeded from it with the refresh token removed, so a worker can never rotate — and thereby
+revoke — the credential the rest of the fleet is using. Instead, dispatch refreshes it
+centrally: when less than `refresh_margin_seconds` (default 18000, five hours) of access-token
+life remains, it holds that harness's new launches until its running workers drain, refreshes
+the shared credential once, and resumes. A refresh that fails is reported by `orchestra status`.
+If the existing access token is still valid, dispatch continues on it — degraded, not
+blocked — until either the refresh trigger succeeds on a later dispatch boundary or the
+refresh-token horizon is reached. But if the access token is already expired when the refresh
+fails, that harness's dispatches are held instead of proceeding: an expired token would fail
+authentication preflight for every issue, which is a blocking outcome, so holding keeps the
+queue intact and retries the refresh each tick until `orchestra harness login claude` re-authenticates
+the home.
 
 The supervised adapters and evidence contract are documented
 in [`protocol/HARNESS-RELIABILITY.md`](protocol/HARNESS-RELIABILITY.md). Do not configure Pi
