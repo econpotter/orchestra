@@ -10,6 +10,9 @@ from pathlib import Path
 from orchestra.config import HarnessConfig
 
 
+_CREDENTIAL_PATHS = (Path(".credentials.json"), Path(".claude") / ".credentials.json")
+
+
 ISOLATION_CAPABILITIES = (
     "isolates_user_config",
     "isolates_user_instructions",
@@ -84,6 +87,34 @@ def session_state_home(root: Path, harness_name: str, session_key: str) -> Path:
     return home
 
 
+def _strip_refresh_token(credential_file: Path) -> None:
+    """Remove the OAuth refresh token from a seeded credential file, in place.
+
+    A per-launch home must never carry a refresh token: the harness's native OAuth
+    refresh rotates and revokes the prior token server-side, so a worker refreshing
+    from its private copy would kill the token still sitting in the shared home
+    (see `docs/plans/2026-07-30-worker-auth-central-refresh.md`). With no refresh
+    token in the copy, a worker physically cannot rotate or revoke anything; its
+    worst case is a clean 401 at true access-token expiry. Every other field,
+    including unknown ones, is preserved. A missing file, a file with no
+    `claudeAiOauth.refreshToken`, or malformed JSON are all left untouched: the
+    credential schema is the harness's own external data, and a worker seeded from
+    a genuinely corrupt credential will simply fail auth on its own, which is a
+    more visible failure than crashing the launch here.
+    """
+    if not credential_file.is_file():
+        return
+    try:
+        data = json.loads(credential_file.read_text())
+    except (OSError, ValueError):
+        return
+    oauth = data.get("claudeAiOauth")
+    if not isinstance(oauth, dict) or "refreshToken" not in oauth:
+        return
+    del oauth["refreshToken"]
+    credential_file.write_text(json.dumps(data))
+
+
 def seed_session_home(source_home: Path, session_home: Path) -> None:
     """Copy the operator-authenticated source home into a private per-launch home.
 
@@ -100,6 +131,10 @@ def seed_session_home(source_home: Path, session_home: Path) -> None:
     reproduced as a link rather than dereferenced — dereferencing crashes on a dangling link
     and can pull in large or out-of-tree content, while the credential files themselves are
     ordinary files, so per-launch auth isolation is unaffected.
+
+    After copying, the refresh token is stripped from the seeded credential file(s) (see
+    `_strip_refresh_token`): a worker never carries a refresh token, so it cannot rotate or
+    revoke the shared home's live token.
     """
     shutil.rmtree(session_home, ignore_errors=True)
     session_home.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -111,6 +146,8 @@ def seed_session_home(source_home: Path, session_home: Path) -> None:
             else:
                 shutil.copy2(entry, target, follow_symlinks=False)
     session_home.chmod(0o700)
+    for relative in _CREDENTIAL_PATHS:
+        _strip_refresh_token(session_home / relative)
 
 
 def _launch_home(
