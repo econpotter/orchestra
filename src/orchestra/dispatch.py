@@ -280,40 +280,49 @@ def _refresh_managed_credentials(
 
     A failed refresh is loud but not fatal: dispatch continues with the existing token
     (degraded rather than deadlocked) and the failure is recorded for `orchestra status`.
+    The same holds for a home that cannot even be resolved or locked — one misconfigured
+    harness must not crash the tick and skip reconcile for every other project.
     """
     held: set[str] = set()
     for name in sorted(harness_names):
         harness = config.harnesses[name]
         if harness.kind != "claude" or harness.environment.policy != "isolated":
             continue  # only a managed Claude home has a credential the engine owns
-        home = managed_auth_home(root, name, harness.environment.state_dir)
-        if not auth.is_stale(home, config.refresh_margin_seconds):
-            continue
-        if _harness_workers_active(reg, config, name):
-            held.add(name)
+        try:
+            home = managed_auth_home(root, name, harness.environment.state_dir)
+            if not auth.is_stale(home, config.refresh_margin_seconds):
+                continue
+            if _harness_workers_active(reg, config, name):
+                held.add(name)
+                print(
+                    f"dispatch: holding {name} launches — shared access token is within "
+                    f"the {config.refresh_margin_seconds}s refresh margin and workers are "
+                    "still active; refreshing once they drain",
+                    file=sys.stderr,
+                )
+                _record_auth_refresh(
+                    root, name,
+                    auth.RefreshOutcome(auth.HELD, "waiting for active workers to drain"),
+                    at=started,
+                )
+                continue
+            outcome = auth.refresh_shared_credential(
+                harness.kind, harness.executable, home,
+                margin_seconds=config.refresh_margin_seconds,
+            )
+            if outcome.action == auth.FAILED:
+                print(
+                    f"dispatch: WARNING shared {name} credential refresh failed "
+                    f"({outcome.detail}); dispatching with the existing token",
+                    file=sys.stderr,
+                )
+            _record_auth_refresh(root, name, outcome, at=started)
+        except (OSError, ValueError) as exc:
             print(
-                f"dispatch: holding {name} launches — shared access token is within the "
-                f"{config.refresh_margin_seconds}s refresh margin and workers are still "
-                "active; refreshing once they drain",
+                f"dispatch: WARNING central refresh for {name} could not run ({exc}); "
+                "dispatching with the existing token",
                 file=sys.stderr,
             )
-            _record_auth_refresh(
-                root, name,
-                auth.RefreshOutcome(auth.HELD, "waiting for active workers to drain"),
-                at=started,
-            )
-            continue
-        outcome = auth.refresh_shared_credential(
-            harness.kind, harness.executable, home,
-            margin_seconds=config.refresh_margin_seconds,
-        )
-        if outcome.action == auth.FAILED:
-            print(
-                f"dispatch: WARNING shared {name} credential refresh failed "
-                f"({outcome.detail}); dispatching with the existing token",
-                file=sys.stderr,
-            )
-        _record_auth_refresh(root, name, outcome, at=started)
     return held
 
 

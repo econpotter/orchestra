@@ -180,8 +180,7 @@ def run_auth_status(
 
 
 def refresh_shared_credential(
-    kind: str, executable: str, home: Path, *,
-    margin_seconds: int, now: float | None = None,
+    kind: str, executable: str, home: Path, *, margin_seconds: int
 ) -> RefreshOutcome:
     """Refresh a shared home's credential in place, as the engine's single writer.
 
@@ -201,7 +200,7 @@ def refresh_shared_credential(
     environment = shared_home_environment(kind, home)
     with credential_lock(home):
         before = access_expiry(home)
-        if before is None or not _stale(before, margin_seconds, now):
+        if before is None or not _stale(before, margin_seconds, None):
             return RefreshOutcome(NOT_NEEDED)
         code = run_auth_status_command(command, environment)
         if code != 0:

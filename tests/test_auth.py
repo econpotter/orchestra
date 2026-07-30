@@ -487,3 +487,19 @@ def test_gate_records_are_atomic_and_keep_other_harnesses(tmp_path: Path, refres
     records = _record(tmp_path)
     assert set(records) == {"other", "claude"}
     assert list(orchestra_dir.glob("auth-refresh.json.tmp")) == []
+
+
+def test_gate_does_not_crash_the_tick_on_an_unusable_managed_home(
+    tmp_path: Path, invocations, capsys,
+):
+    """One misconfigured harness must not abort dispatch — that would skip reconcile too."""
+    config = _gate_config(tmp_path)
+    config.harnesses["claude"].environment.state_dir = "/tmp/outside-the-managed-tree"
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    assert held == set()
+    assert invocations == []
+    assert "central refresh for claude could not run" in capsys.readouterr().err
