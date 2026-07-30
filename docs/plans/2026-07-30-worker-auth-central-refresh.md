@@ -102,7 +102,107 @@ that ruling assumed revocation was expiry-driven and ~monthly, which the
    locked atomic write-back + tests.
 4. Doctor probe + expiry readout + tests.
 5. `harness login` subcommand + test.
-6. Propose the decision of record for operator ratification.
+6. Propose the decision of record for operator ratification (handled at
+   finish: the controller presents the proposal from the Design section).
+
+## Global constraints
+
+- Python 3.13, src layout, `uv`. Run checks the repo way (see `AGENTS.md`
+  and `pyproject.toml`): pytest suite, ruff, strict mypy — all must pass.
+- NEVER run a real OAuth refresh, login, or logout against the live shared
+  home (`.orchestra/homes/claude`) or any real credential in spikes or
+  tests. Tests use synthetic credential files in tmp dirs only. A stray
+  refresh revokes the operator's live fleet token.
+- The credential file is the harness's own (`.credentials.json` in the
+  config dir): treat its schema as external data — parse defensively,
+  preserve unknown fields byte-for-byte where the design says "intact."
+- Match existing code style and module boundaries; no new dependencies
+  without strong reason.
+
+## Tasks
+
+### Task 1 — Spike: refresh trigger, credential schema, probe endpoint
+
+Read-only investigation; no production code. Deliverable is a note at
+`docs/notes/2026-07-30-refresh-trigger-spike.md` answering:
+
+1. **Refresh trigger:** the cheapest `claude` CLI invocation that, with
+   `CLAUDE_CONFIG_DIR` pointed at a config dir whose access token nears
+   expiry, performs the native refresh and persists the rotated credential
+   in place. Inspect `claude --help`, auth-related subcommands, and the
+   installed CLI's code if inspectable. If no free trigger exists, identify
+   the cheapest metered one (e.g. a minimal `-p` call) and, as fallback,
+   document what a direct token-endpoint refresh would require (endpoint,
+   client id, grant type) from CLI inspection only.
+2. **Credential schema:** exact JSON shape of `.credentials.json` (field
+   names for access token, refresh token, expiry, scopes, wrapping object).
+   Use the live file's KEYS only — never copy, print, or move token VALUES.
+3. **Probe endpoint:** a zero- or near-zero-cost authenticated HTTP request
+   that returns success for a valid access token and 401 for a revoked one
+   (candidate: the OAuth profile/userinfo endpoint the CLI itself calls).
+4. Where in this repo the engine could invoke the trigger: confirm how
+   `harness.py`/`envelope.py` compose the CLI invocation today.
+
+Constraints: do not run any command that could refresh or revoke the live
+token (no `auth login`, no `auth logout`, no metered calls against the real
+home). Everything observational.
+
+### Task 2 — Strip refresh token from per-launch seeds
+
+In `src/orchestra/envelope.py`, after the per-launch home copy is seeded,
+rewrite the seeded credential file to remove the refresh token (field name
+per Task 1's spike note), leaving every other field and file intact. If the
+seeded home has no credential file, do nothing. Tests
+(`tests/test_envelope.py`): seeding a synthetic home whose credential file
+contains a refresh token yields a copy without it, all sibling fields and
+files byte-identical; a home without a credential file seeds as today.
+
+### Task 3 — Central refresher in the engine
+
+Single-writer refresh of the shared home's credential, owned by the
+dispatch path (`supervisor.py` / `harness.py` — follow the repo's actual
+seams):
+
+- At each dispatch boundary for a harness with a managed home: read the
+  shared home's credential expiry; if remaining lifetime < margin (config:
+  `refresh_margin`, default generous enough to cover the longest expected
+  run — pick from existing config patterns in `config.py`), do not seed a
+  near-dead token; instead quiesce and refresh.
+- Quiesce: refresh only when no workers of that harness are active. Hold
+  the new dispatch, wait for active launches to drain (the supervisor knows
+  its launches), refresh, then resume.
+- Refresh mechanism: Task 1's trigger, invoked with `CLAUDE_CONFIG_DIR`
+  pointing at the shared home; on success the harness has persisted the
+  rotated credential itself. Write access to the shared home is serialized
+  with an exclusive file lock; any orchestra-side rewrite of the credential
+  file is atomic (tmp file + rename).
+- Failure: if the refresh invocation fails, log loudly and dispatch anyway
+  with the existing token (degraded, not dead-locked); surface the failure
+  in status output.
+- Tests: quiescence gating (no refresh while a launch is active; refresh
+  before the next seed once drained), margin arithmetic on synthetic
+  credentials, lock serialization, atomic write. Fake the refresh
+  invocation; never a real one.
+
+### Task 4 — Honest doctor
+
+`orchestra harness doctor claude` (see `cli.py`/`harness.py` doctor path)
+gains: (a) expiry readout — access and refresh expiry timestamps with
+days-remaining, WARNING when the refresh horizon is within threshold
+(default 5 days); (b) a revocation probe — the Task 1 probe endpoint called
+with the shared home's access token, reporting valid/revoked/unreachable
+(unreachable is a warning, not a failure). Probe is opt-out-able via flag
+if it costs anything. Tests: fake HTTP responses for valid/revoked/
+unreachable; expiry math on synthetic credentials.
+
+### Task 5 — `orchestra harness login <name>`
+
+New CLI subcommand running the isolated-home login flow that `harness
+setup` currently only prints (`CLAUDE_CONFIG_DIR=<managed home> <exe>`
+login invocation, interactive, exec'd so the operator drives it). Refuse
+with a clear message when the home does not exist (point at `harness
+setup`). Tests: command composition and error paths (no interactive login
+in tests).
 
 ## Open questions
 
