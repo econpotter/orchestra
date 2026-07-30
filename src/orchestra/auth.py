@@ -264,10 +264,14 @@ def probe_access_token(
     """valid / revoked / unreachable for one access token.
 
     A 2xx response is `valid`; an explicit 401 or 403 is `revoked`. Everything else —
-    timeout, network error, 5xx, or an unexpected 4xx — is `unreachable`: the endpoint's
-    behavior was identified from binary strings only and never exercised live, so anything
-    short of an unambiguous auth failure is treated as indeterminate, never as `revoked`.
-    `unreachable` is a warning; it must never cause `harness doctor` to fail.
+    timeout, network error, malformed HTTP response, 5xx, or an unexpected 4xx — is
+    `unreachable`: the endpoint's behavior was identified from binary strings only and
+    never exercised live, so anything short of an unambiguous auth failure is treated as
+    indeterminate, never as `revoked`. `unreachable` is a warning; it must never cause
+    `harness doctor` to fail, and it must never crash it either — hence the blanket except
+    below rather than an enumerated list of exception types (a flaky proxy or a truncated
+    status line can raise `http.client.HTTPException` subclasses, which are not `OSError`s
+    and so would otherwise slip past a narrower catch).
 
     The token value is used only as this one request's Authorization header over HTTPS —
     never logged, printed, or written anywhere.
@@ -277,7 +281,8 @@ def probe_access_token(
             return VALID
     except urllib.error.HTTPError as exc:
         return REVOKED if exc.code in (401, 403) else UNREACHABLE
-    except (urllib.error.URLError, OSError, ValueError):
+    except Exception:  # noqa: BLE001 — see docstring: any other failure is indeterminate,
+        # never a hard failure and never "revoked".
         return UNREACHABLE
 
 

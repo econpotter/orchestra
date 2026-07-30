@@ -395,6 +395,19 @@ def test_probe_access_token_is_unreachable_on_a_timeout(monkeypatch):
     assert auth.probe_access_token("secret-token-value") == auth.UNREACHABLE
 
 
+def test_probe_access_token_is_unreachable_on_a_malformed_http_response(monkeypatch):
+    """A flaky proxy or a truncated status line can raise an `http.client.HTTPException`
+    subclass (e.g. `BadStatusLine`, `IncompleteRead`) — not an `OSError`, so a narrower
+    except clause would let this crash doctor instead of degrading to `unreachable`."""
+    import http.client
+
+    def fake(token, timeout):
+        raise http.client.BadStatusLine("")
+
+    monkeypatch.setattr(auth, "_open_probe", fake)
+    assert auth.probe_access_token("secret-token-value") == auth.UNREACHABLE
+
+
 def test_probe_access_token_never_leaks_the_token_value(monkeypatch, capsys):
     """The token must reach the probe only via the Authorization header of the one HTTPS
     request — never be logged, printed, or surfaced in any exception message."""
