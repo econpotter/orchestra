@@ -39,6 +39,7 @@ from orchestra.provenance import package_tree_digest, runtime_provenance
 from orchestra.queue import find_issue, read_queue, write_queue
 from orchestra.reconcile import reconcile as _reconcile
 from orchestra.registry import issue_key, load_registry
+from orchestra.selection import harness_workers_active
 from orchestra.scaffold import new_project
 from orchestra.workspace import WorkspaceError, resolve_workspace, save_workspace_setting
 
@@ -92,14 +93,14 @@ def _isolated_harness(root: Path, name: str):
         root, name, harness, adapter.capabilities, home=Path.home(),
         instruction_policy="explicit_bundle" if harness.kind == "claude" else "native_project",
     )
-    return harness, envelope
+    return config, harness, envelope
 
 
 def cmd_harness_setup(args: argparse.Namespace) -> int:
     resolved = _isolated_harness(Path(args.root), args.name)
     if resolved is None:
         return 2
-    harness, envelope = resolved
+    _config, harness, envelope = resolved
     variable = "CODEX_HOME" if harness.kind == "codex" else "CLAUDE_CONFIG_DIR"
     state_dir = Path(dict(envelope.environment)[variable])
     try:
@@ -137,7 +138,7 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
     resolved = _isolated_harness(Path(args.root), args.name)
     if resolved is None:
         return 2
-    harness, envelope = resolved
+    config, harness, envelope = resolved
     variable = "CODEX_HOME" if harness.kind == "codex" else "CLAUDE_CONFIG_DIR"
     state_dir = Path(dict(envelope.environment)[variable])
     state_dir_exists = state_dir.is_dir()
@@ -157,13 +158,29 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
         environment = os.environ.copy()
         environment.update(dict(envelope.environment))
         # Doctor's login check runs against the SHARED home, and for Claude the check
-        # command *is* the refresh trigger: it rotates and persists the credential when the
-        # access token is near expiry, revoking the prior one. So it goes through the same
-        # lock the dispatch refresher holds — otherwise an operator running doctor mid-tick
-        # could rotate the token out from under a dispatch that is seeding it.
-        login = "authenticated" if auth.run_auth_status(
-            harness.kind, harness.executable, state_dir, environment
-        ) else "not_authenticated"
+        # command *is* the refresh trigger: past or near expiry it rotates and persists the
+        # credential, revoking the prior access token. So it may only run when the dispatch
+        # refresher itself would be allowed to run.
+        #
+        # Quiescence first: rotating while workers hold a seeded copy of the current token
+        # 401s every one of them mid-run. The operator flow this protects is the obvious one
+        # — `status` reports a held refresh, the operator runs `doctor` to find out why.
+        # Only relevant inside the refresh margin: outside it the CLI has nothing to rotate,
+        # so doctor stays usable during ordinary operation, which is when it is needed.
+        # Then the lock, so doctor cannot race a dispatch that is refreshing or seeding.
+        if (
+            harness.kind == "claude"
+            and auth.is_stale(state_dir, config.refresh_margin_seconds)
+            and harness_workers_active(
+                load_registry(Path(args.root) / ".orchestra" / "workers.json"),
+                config, args.name,
+            )
+        ):
+            login = "not_checked_workers_active"
+        else:
+            login = "authenticated" if auth.run_auth_status(
+                harness.kind, harness.executable, state_dir, environment
+            ) else "not_authenticated"
 
     instructions = "not_configured"
     if harness.kind == "codex" and harness.environment.instructions_file:

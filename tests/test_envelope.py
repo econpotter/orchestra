@@ -335,3 +335,52 @@ def test_isolated_state_directory_must_be_workspace_managed(tmp_path: Path):
         build_execution_envelope(
             tmp_path, "codex", harness, {}, home=tmp_path / "home"
         )
+
+
+def test_reseed_credentials_takes_the_shared_token_and_keeps_the_session_state(
+    tmp_path: Path,
+):
+    """A resume seeds from the parent's home for its transcript, but the parent's access
+    token only ages (no refresh token to roll it forward), so the credential is replaced
+    from the shared home and re-stripped."""
+    from orchestra.envelope import reseed_credentials
+
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    fresh = _credential_json()
+    fresh["claudeAiOauth"]["accessToken"] = "freshly-refreshed-access-token"
+    (source / ".credentials.json").write_text(json.dumps(fresh))
+    parent = session_state_home(tmp_path, "claude", "attempt-parent")
+    parent.mkdir(parents=True)
+    aged = _credential_json()
+    aged["claudeAiOauth"]["accessToken"] = "aged-parent-access-token"
+    (parent / ".credentials.json").write_text(json.dumps(aged))
+    (parent / "projects").mkdir()
+    (parent / "projects" / "session.jsonl").write_text('{"transcript": true}\n')
+    session = session_state_home(tmp_path, "claude", "attempt-resume")
+
+    seed_session_home(parent, session)
+    reseed_credentials(source, session)
+
+    oauth = json.loads((session / ".credentials.json").read_text())["claudeAiOauth"]
+    assert oauth["accessToken"] == "freshly-refreshed-access-token"
+    assert "refreshToken" not in oauth          # stripped again, as on any seed
+    # The resume's whole point — the parent's session transcript — survives.
+    assert (session / "projects" / "session.jsonl").read_text() == '{"transcript": true}\n'
+
+
+def test_reseed_credentials_leaves_the_seed_alone_when_the_source_has_none(tmp_path: Path):
+    from orchestra.envelope import reseed_credentials
+
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    parent = session_state_home(tmp_path, "claude", "attempt-parent-2")
+    parent.mkdir(parents=True)
+    (parent / ".credentials.json").write_text(json.dumps(_credential_json()))
+    session = session_state_home(tmp_path, "claude", "attempt-resume-2")
+
+    seed_session_home(parent, session)
+    reseed_credentials(source, session)
+
+    oauth = json.loads((session / ".credentials.json").read_text())["claudeAiOauth"]
+    assert oauth["accessToken"] == "operator-access-token"

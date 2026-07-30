@@ -153,6 +153,29 @@ def seed_session_home(source_home: Path, session_home: Path) -> None:
         _strip_refresh_token(session_home / relative)
 
 
+def reseed_credentials(source_home: Path, session_home: Path) -> None:
+    """Replace a seeded home's credential file(s) with the shared home's current ones.
+
+    Only used when a launch is seeded from a parent launch's home (a resume, which must
+    inherit the parent's session transcript). That parent copy carries no refresh token, so
+    its access token can only *age* — a resumed long run would otherwise start on a token
+    older than the one the engine has been keeping alive centrally. Copying the shared
+    home's credential over it keeps the transcript and takes the fresh token; the refresh
+    token is stripped again, exactly as an ordinary seed.
+
+    A source without a credential file leaves the seeded one alone: the seeded copy failing
+    authentication preflight is a clearer failure than an empty home.
+    """
+    for relative in _CREDENTIAL_PATHS:
+        source = source_home / relative
+        if not source.is_file():
+            continue
+        target = session_home / relative
+        target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        shutil.copy2(source, target, follow_symlinks=False)
+        _strip_refresh_token(target)
+
+
 def _launch_home(
     root: Path, harness_name: str, configured: str | None, session_key: str | None
 ) -> Path:

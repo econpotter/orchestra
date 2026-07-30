@@ -503,3 +503,50 @@ def test_gate_does_not_crash_the_tick_on_an_unusable_managed_home(
     assert held == set()
     assert invocations == []
     assert "central refresh for claude could not run" in capsys.readouterr().err
+
+
+def test_gate_holds_when_the_refresh_failed_and_the_token_is_already_expired(
+    tmp_path: Path, monkeypatch, capsys,
+):
+    """Dispatching an expired token fails preflight, and authentication_failure BLOCKS the
+    issue — so "degraded" would silently become "every issue blocked". Hold instead."""
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=-60)
+    monkeypatch.setattr(auth, "run_auth_status_command", lambda command, environment: 1)
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    assert held == {"claude"}
+    assert "access token is expired" in capsys.readouterr().err
+    record = _record(tmp_path)["claude"]
+    assert record["outcome"] == auth.FAILED
+    assert "holding claude dispatches" in record["detail"]
+
+
+def test_gate_retries_the_refresh_on_the_next_tick_while_held(tmp_path: Path, monkeypatch):
+    """Holding must not be a dead end: each tick re-attempts the (free) refresh, so a
+    transient failure recovers without the operator doing anything."""
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=-60)
+    attempts = {"n": 0}
+
+    def flaky(command, environment):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return 1
+        _set_expiry(_shared_home(tmp_path), expires_in=40000)
+        return 0
+
+    monkeypatch.setattr(auth, "run_auth_status_command", flaky)
+    started = "2026-07-30T00:00:00+00:00"
+
+    assert _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started=started
+    ) == {"claude"}
+    assert _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started=started
+    ) == set()
+    assert attempts["n"] == 2
+    assert _record(tmp_path)["claude"]["outcome"] == auth.REFRESHED

@@ -552,3 +552,97 @@ def test_dispatch_refreshes_credentials_before_any_launch(tmp_path, monkeypatch)
     assert d.dispatch(tmp_path, cfg, started="t") == [issue_key("wf", 1)]
     assert order == ["refresh", "launch"]
     _wait_all_dead(tmp_path)
+
+
+ISOLATED_CONFIG = CONFIG.replace(
+    "    preflight: false\n",
+    "    preflight: false\n"
+    "    environment: {policy: isolated, state_dir: .orchestra/homes/fake}\n",
+)
+
+
+def _shared_credential(root: Path, access_token: str) -> Path:
+    home = root / ".orchestra" / "homes" / "fake"
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / ".credentials.json"
+    path.write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": access_token, "refreshToken": "shared-refresh-token",
+        "expiresAt": int((time.time() + 40000) * 1000),
+        "refreshTokenExpiresAt": int((time.time() + 30 * 86400) * 1000),
+    }}))
+    return home
+
+
+def test_dispatch_seeds_the_launch_home_under_the_credential_lock(tmp_path, monkeypatch):
+    """`harness doctor` holds only the credential lock, so a rotation could otherwise land
+    mid-copy and seed a torn or already-revoked credential."""
+    import fcntl
+
+    from orchestra import auth
+    import orchestra.dispatch as d
+
+    _setup(tmp_path, _issue(1, "open"))
+    (tmp_path / "config.yaml").write_text(ISOLATED_CONFIG)
+    source_home = _shared_credential(tmp_path, "shared-access-token")
+    cfg = load_config(tmp_path / "config.yaml")
+    observed = {}
+    real_seed = d.seed_session_home
+
+    def seeding(seed_home, session_home):
+        contender = open(auth._lock_path(source_home), "w")
+        try:
+            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            observed["locked"] = False
+        except BlockingIOError:
+            observed["locked"] = True
+        finally:
+            contender.close()
+        return real_seed(seed_home, session_home)
+
+    monkeypatch.setattr(d, "seed_session_home", seeding)
+
+    assert d.dispatch(tmp_path, cfg, started="t") == [issue_key("wf", 1)]
+    assert observed["locked"] is True
+    _wait_all_dead(tmp_path)
+
+
+def test_resume_seeds_the_parents_session_state_with_the_shared_token(tmp_path):
+    """A resumed launch inherits the parent's transcript but NOT its aged access token:
+    a per-launch copy has no refresh token, so its token only ages while the shared one is
+    kept alive centrally."""
+    from orchestra.attempt import AttemptStore
+    from orchestra.envelope import session_state_home
+    import orchestra.dispatch as d
+
+    _setup(tmp_path, _issue(1, "open"))
+    (tmp_path / "config.yaml").write_text(ISOLATED_CONFIG)
+    _shared_credential(tmp_path, "shared-access-token")
+    cfg = load_config(tmp_path / "config.yaml")
+
+    store = AttemptStore(tmp_path)
+    parent = store.create(
+        attempt_id="wf-001-validator-parent", project="wf", number=1, role="validator",
+        harness="codex", model="m", worktree=tmp_path, branch="issue/001-t",
+        start_commit="", prompt="p", instruction_bundle="i", configuration={},
+        capabilities={}, parent_attempt=None,
+    )
+    store.update(parent, retry_disposition="resume", session_id="session-1")
+    parent_home = session_state_home(tmp_path, "fake", parent.attempt_id)
+    parent_home.mkdir(parents=True)
+    (parent_home / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": "aged-parent-access-token",
+        "expiresAt": int((time.time() + 60) * 1000),
+    }}))
+    (parent_home / "projects").mkdir()
+    (parent_home / "projects" / "session-1.jsonl").write_text('{"transcript": true}\n')
+
+    assert d.dispatch(tmp_path, cfg, started="t") == [issue_key("wf", 1)]
+    reg = load_registry(tmp_path / ".orchestra" / "workers.json")
+    session_home = session_state_home(tmp_path, "fake", reg[issue_key("wf", 1)].attempt_id)
+    oauth = json.loads((session_home / ".credentials.json").read_text())["claudeAiOauth"]
+
+    assert oauth["accessToken"] == "shared-access-token"   # not the parent's aged one
+    assert "refreshToken" not in oauth                     # stripped, as on any seed
+    assert (session_home / "projects" / "session-1.jsonl").exists()   # transcript kept
+    assert not parent_home.exists()                        # parent home consumed
+    _wait_all_dead(tmp_path)

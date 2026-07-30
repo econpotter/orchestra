@@ -27,6 +27,7 @@ from orchestra.envelope import (
     build_execution_envelope,
     execution_envelope_fingerprint,
     managed_auth_home,
+    reseed_credentials,
     seed_session_home,
     session_state_home,
 )
@@ -48,10 +49,10 @@ from orchestra.registry import (
     save_registry,
 )
 from orchestra.selection import (
+    harness_workers_active,
     process_start_time,
     role_for_issue,
     select_dispatchable,
-    worker_alive,
 )
 from orchestra.validate import validate_structural
 
@@ -222,24 +223,6 @@ def build_context(
 _AUTH_REFRESH_RECORD = "auth-refresh.json"
 
 
-def _harness_workers_active(
-    reg: dict[str, WorkerHandle], config: Config, harness_name: str
-) -> bool:
-    """True while any live launch of this harness could still hold a seeded access token.
-
-    Liveness, not mere registry presence: a handle whose supervisor is gone holds nothing,
-    and a stale row left behind by a crash must not block refresh forever — that would let
-    the shared token die at expiry, which is the failure this whole path exists to prevent.
-    """
-    for handle in reg.values():
-        role_cfg = config.roles.get(handle.role)
-        if role_cfg is None or role_cfg.harness != harness_name:
-            continue
-        if worker_alive(handle):
-            return True
-    return False
-
-
 def _record_auth_refresh(
     root: Path, harness_name: str, outcome: auth.RefreshOutcome, *, at: str
 ) -> None:
@@ -278,8 +261,14 @@ def _refresh_managed_credentials(
     reconcile has reaped the drained workers, refreshes and resumes. Other harnesses are
     unaffected — only the stale one is held.
 
-    A failed refresh is loud but not fatal: dispatch continues with the existing token
-    (degraded rather than deadlocked) and the failure is recorded for `orchestra status`.
+    A failed refresh is loud but not fatal *while the existing token still works*: dispatch
+    continues on it (degraded rather than deadlocked) and the failure is recorded for
+    `orchestra status`. If the refresh failed and the access token is already expired, the
+    harness is held instead. Dispatching then would fail authentication preflight, and
+    `authentication_failure` is a blocking outcome (`outcome.decide_attempt`) — so
+    "degraded" would quietly become "every issue in the queue blocked" for a condition only
+    a re-login fixes. Holding keeps the queue intact and retries the refresh each tick.
+
     The same holds for a home that cannot even be resolved or locked — one misconfigured
     harness must not crash the tick and skip reconcile for every other project.
     """
@@ -292,7 +281,7 @@ def _refresh_managed_credentials(
             home = managed_auth_home(root, name, harness.environment.state_dir)
             if not auth.is_stale(home, config.refresh_margin_seconds):
                 continue
-            if _harness_workers_active(reg, config, name):
+            if harness_workers_active(reg, config, name):
                 held.add(name)
                 print(
                     f"dispatch: holding {name} launches — shared access token is within "
@@ -311,11 +300,28 @@ def _refresh_managed_credentials(
                 margin_seconds=config.refresh_margin_seconds,
             )
             if outcome.action == auth.FAILED:
-                print(
-                    f"dispatch: WARNING shared {name} credential refresh failed "
-                    f"({outcome.detail}); dispatching with the existing token",
-                    file=sys.stderr,
-                )
+                # `margin_seconds=0` asks the narrower question "is the token dead *now*",
+                # not "is it inside the dispatch margin".
+                if auth.is_stale(home, 0):
+                    held.add(name)
+                    outcome = auth.RefreshOutcome(
+                        auth.FAILED,
+                        f"{outcome.detail}; access token is expired — holding {name} "
+                        f"dispatches until a refresh succeeds or the home is re-authenticated "
+                        f"(orchestra harness setup {name})",
+                    )
+                    print(
+                        f"dispatch: WARNING shared {name} credential refresh failed and the "
+                        f"access token is expired ({outcome.detail}); holding {name} "
+                        "dispatches rather than blocking every issue on preflight",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"dispatch: WARNING shared {name} credential refresh failed "
+                        f"({outcome.detail}); dispatching with the existing token",
+                        file=sys.stderr,
+                    )
             _record_auth_refresh(root, name, outcome, at=started)
         except (OSError, ValueError) as exc:
             print(
@@ -527,9 +533,13 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                     source_home = managed_auth_home(
                         root, role_cfg.harness, harness.environment.state_dir
                     )
-                    # A resume must inherit the parent launch's session state (transcript +
-                    # its already-refreshed token), so seed from the parent's home; the parent
-                    # is finalized (sequential), so there is no concurrent writer to clobber.
+                    # A resume must inherit the parent launch's session state (its
+                    # transcript), so seed from the parent's home; the parent is finalized
+                    # (sequential), so there is no concurrent writer to clobber. Its
+                    # CREDENTIAL, however, is the oldest one around — a per-launch copy has
+                    # no refresh token, so its access token only ages — and a resume is the
+                    # long-run case the margin exists for. Take the transcript from the
+                    # parent and the token from the shared home.
                     seed_home = source_home
                     if attempt_config["resume_session"] and retry_parent is not None:
                         parent_home = session_state_home(
@@ -537,9 +547,15 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                         )
                         if parent_home.is_dir():
                             seed_home = parent_home
-                    seed_session_home(seed_home, session_home)
-                    if seed_home != source_home:
-                        shutil.rmtree(seed_home, ignore_errors=True)  # consumed the parent home
+                    # Under the credential lock: `harness doctor` takes only this lock (not
+                    # the engine lock), so without it a rotation could land mid-copy and seed
+                    # a torn or already-revoked credential.
+                    with auth.credential_lock(source_home):
+                        seed_session_home(seed_home, session_home)
+                        if seed_home != source_home:
+                            reseed_credentials(source_home, session_home)
+                            # consumed the parent home
+                            shutil.rmtree(seed_home, ignore_errors=True)
                 attempt_config["execution_envelope"] = asdict(envelope)
                 instruction_setup_error = ""
                 if harness.kind == "codex" and harness.environment.instructions_file:

@@ -351,3 +351,135 @@ def test_status_prints_a_held_or_failed_central_refresh(tmp_path, capsys):
     assert "auth: claude refresh failed" in out
     assert "auth status exited 1" in out
     assert "codex" not in out          # a healthy refresh is not an operator concern
+
+
+CLAUDE_DOCTOR_CONFIG = """\
+slots: 1
+refresh_margin_seconds: 18000
+roles:
+  validator: {harness: automation, model: m, prompt: p.md}
+  worker: {harness: automation, model: m, prompt: p.md,
+           instruction_policy: explicit_bundle}
+  verifier: {harness: automation, model: m, prompt: p.md}
+harnesses:
+  automation:
+    kind: claude
+    executable: claude
+    environment: {policy: isolated, state_dir: .orchestra/homes/claude}
+"""
+
+
+def _doctor_setup(root, monkeypatch, *, expires_in):
+    """An isolated Claude harness with a synthetic credential `expires_in` seconds out."""
+    import json
+    import time
+
+    import orchestra.cli as cli
+
+    (root / "PROJECTS.md").write_text("# Projects\n")
+    (root / "config.yaml").write_text(CLAUDE_DOCTOR_CONFIG)
+    state_dir = root / ".orchestra" / "homes" / "claude"
+    state_dir.mkdir(parents=True)
+    state_dir.chmod(0o700)
+    (state_dir / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": "a", "refreshToken": "r",
+        "expiresAt": int((time.time() + expires_in) * 1000),
+        "refreshTokenExpiresAt": int((time.time() + 30 * 86400) * 1000),
+    }}))
+    monkeypatch.setattr(cli, "preflight_harness", lambda kind, executable: "claude 9.9")
+    monkeypatch.setattr(cli.shutil, "which", lambda executable: "/usr/bin/claude")
+    return state_dir
+
+
+def _live_worker_registry(root):
+    """One live worker of the `automation` harness (the `worker` role uses it)."""
+    import json
+    import os
+
+    from orchestra.selection import process_start_time
+
+    pid = os.getpid()
+    (root / ".orchestra").mkdir(parents=True, exist_ok=True)
+    (root / ".orchestra" / "workers.json").write_text(json.dumps({"wf#001": {
+        "project": "wf", "number": 1, "role": "worker", "branch": "issue/001-x",
+        "worktree": "/tmp/wt", "pid": pid, "attempt_id": "a1",
+        "manifest": "/tmp/a1/manifest.json", "stdout": "/tmp/a1/stdout.jsonl",
+        "stderr": "/tmp/a1/stderr.log", "started": "2026-07-30T00:00:00+00:00",
+        "start_sha": "abc", "proc_start": process_start_time(pid) or "",
+        "supervisor_unit": "",
+    }}))
+
+
+def test_harness_doctor_refuses_to_rotate_while_workers_are_active(
+    tmp_path, monkeypatch, capsys,
+):
+    """Doctor's Claude auth check IS the refresh trigger: near expiry it rotates, revoking
+    the token every in-flight worker is holding. The operator flow this protects is the
+    obvious one — status reports a held refresh, the operator runs doctor to find out why."""
+    import json
+
+    from orchestra import auth
+
+    state_dir = _doctor_setup(tmp_path, monkeypatch, expires_in=600)
+    _live_worker_registry(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        auth, "run_auth_status_command",
+        lambda command, environment: calls.append(command) or 0,
+    )
+
+    assert main([
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+    ]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["login"] == "not_checked_workers_active"
+    assert report["ready"] is False
+    assert calls == []
+    # The credential is left exactly as it was.
+    assert json.loads((state_dir / ".credentials.json").read_text())[
+        "claudeAiOauth"]["accessToken"] == "a"
+
+
+def test_harness_doctor_checks_login_once_the_harness_has_drained(
+    tmp_path, monkeypatch, capsys,
+):
+    import json
+
+    from orchestra import auth
+
+    _doctor_setup(tmp_path, monkeypatch, expires_in=600)   # stale, but nothing is running
+    calls = []
+    monkeypatch.setattr(
+        auth, "run_auth_status_command",
+        lambda command, environment: calls.append(command) or 0,
+    )
+
+    assert main([
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["login"] == "authenticated"
+    assert calls == [["claude", "auth", "status", "--json"]]
+
+
+def test_harness_doctor_stays_usable_while_the_token_has_life_left(
+    tmp_path, monkeypatch, capsys,
+):
+    """Outside the refresh margin the trigger has nothing to rotate, so doctor must keep
+    working during ordinary operation — which is exactly when an operator reaches for it."""
+    import json
+
+    from orchestra import auth
+
+    _doctor_setup(tmp_path, monkeypatch, expires_in=40000)
+    _live_worker_registry(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        auth, "run_auth_status_command",
+        lambda command, environment: calls.append(command) or 0,
+    )
+
+    assert main([
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["login"] == "authenticated"
+    assert calls == [["claude", "auth", "status", "--json"]]
