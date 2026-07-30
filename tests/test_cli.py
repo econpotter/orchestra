@@ -222,6 +222,73 @@ def test_harness_doctor_is_nonzero_when_isolated_home_is_not_ready(
     assert report["ready"] is False
 
 
+def test_harness_doctor_checks_claude_login_under_the_credential_lock(
+    tmp_path, monkeypatch, capsys,
+):
+    """Doctor's Claude auth check IS the refresh trigger, so it must hold the same lock
+    the dispatch refresher holds — otherwise it can rotate the shared token out from
+    under a dispatch that is seeding it."""
+    import fcntl
+    import json
+
+    from orchestra import auth
+    import orchestra.cli as cli
+
+    _write_harness_config(tmp_path, kind="claude")
+    state_dir = tmp_path / ".orchestra" / "homes" / "codex"
+    state_dir.mkdir(parents=True)
+    state_dir.chmod(0o700)
+    monkeypatch.setattr(cli, "preflight_harness", lambda kind, executable: "claude 9.9")
+    monkeypatch.setattr(cli.shutil, "which", lambda executable: "/usr/bin/claude")
+    observed = {}
+
+    def fake(command, environment):
+        contender = open(auth._lock_path(state_dir), "w")
+        try:
+            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            observed["locked"] = False
+        except BlockingIOError:
+            observed["locked"] = True
+        finally:
+            contender.close()
+        observed["command"] = command
+        observed["home"] = environment["CLAUDE_CONFIG_DIR"]
+        return 0
+
+    monkeypatch.setattr(auth, "run_auth_status_command", fake)
+
+    assert main([
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+    ]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["login"] == "authenticated"
+    assert observed["command"] == ["claude", "auth", "status", "--json"]
+    assert observed["home"] == str(state_dir)
+    assert observed["locked"] is True
+
+
+def test_harness_doctor_reports_not_authenticated_when_the_check_fails(
+    tmp_path, monkeypatch, capsys,
+):
+    import json
+
+    from orchestra import auth
+    import orchestra.cli as cli
+
+    _write_harness_config(tmp_path, kind="claude")
+    state_dir = tmp_path / ".orchestra" / "homes" / "codex"
+    state_dir.mkdir(parents=True)
+    state_dir.chmod(0o700)
+    monkeypatch.setattr(cli, "preflight_harness", lambda kind, executable: "claude 9.9")
+    monkeypatch.setattr(cli.shutil, "which", lambda executable: "/usr/bin/claude")
+    monkeypatch.setattr(auth, "run_auth_status_command", lambda command, env: 1)
+
+    assert main([
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+    ]) == 1
+    assert json.loads(capsys.readouterr().out)["login"] == "not_authenticated"
+
+
 def test_harness_setup_rejects_unsupported_environment(tmp_path, capsys):
     _write_harness_config(tmp_path, policy="ambient")
 
@@ -263,3 +330,24 @@ def test_attempt_explain_surfaces_provenance_and_terminal_evidence(tmp_path, cap
     assert report["failure_category"] == "authentication_failure"
     assert report["instruction_policy"] == "native_project"
     assert report["artifacts"]["manifest"]["exists"] is True
+
+
+def test_status_prints_a_held_or_failed_central_refresh(tmp_path, capsys):
+    import json
+
+    (tmp_path / "queue").mkdir()
+    (tmp_path / "PROJECTS.md").write_text("# Projects\n")
+    (tmp_path / "config.yaml").write_text("slots: 1\n")
+    orchestra_dir = tmp_path / ".orchestra"
+    orchestra_dir.mkdir()
+    (orchestra_dir / "auth-refresh.json").write_text(json.dumps({
+        "claude": {"outcome": "failed", "detail": "auth status exited 1",
+                   "at": "2026-07-30T00:00:00+00:00"},
+        "codex": {"outcome": "refreshed", "detail": "", "at": "2026-07-30T00:00:00+00:00"},
+    }))
+
+    assert main(["status", "--root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "auth: claude refresh failed" in out
+    assert "auth status exited 1" in out
+    assert "codex" not in out          # a healthy refresh is not an operator concern

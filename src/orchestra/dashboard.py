@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -34,4 +35,23 @@ def summarize(root: str | Path) -> dict:
         }
         for key, h in reg.items()
     ]
-    return {"slots_used": len(reg), "running": running, "counts": dict(counts)}
+    return {
+        "slots_used": len(reg),
+        "running": running,
+        "counts": dict(counts),
+        "auth_refresh": _auth_refresh(root),
+    }
+
+
+def _auth_refresh(root: Path) -> dict:
+    """The last central-refresh event per harness, as dispatch recorded it.
+
+    A held or failed refresh is why launches of that harness stalled, so it belongs in
+    status rather than only in a dispatch log line the operator never sees.
+    """
+    path = root / ".orchestra" / "auth-refresh.json"
+    try:
+        records = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return records if isinstance(records, dict) else {}

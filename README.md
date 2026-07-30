@@ -157,6 +157,15 @@ flags are missing. The `danger-full-access` setting is appropriate only inside a
 boundary you trust;
 enable the workspace's outer `sandbox` when filesystem confinement is required.
 
+Orchestra is the single writer of that dedicated directory's OAuth token. Each launch is
+seeded from it with the refresh token removed, so a worker can never rotate — and thereby
+revoke — the credential the rest of the fleet is using. Instead, dispatch refreshes it
+centrally: when less than `refresh_margin_seconds` (default 18000, five hours) of access-token
+life remains, it holds that harness's new launches until its running workers drain, refreshes
+the shared credential once, and resumes. A refresh that fails is reported by `orchestra status`
+and does not block dispatch, which continues on the existing token until the refresh-token
+horizon is reached and `orchestra harness setup claude` is needed again.
+
 The supervised adapters and evidence contract are documented
 in [`protocol/HARNESS-RELIABILITY.md`](protocol/HARNESS-RELIABILITY.md). Do not configure Pi
 as if it were an implemented, verified harness.

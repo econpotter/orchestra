@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
-from orchestra import git_ops, layout
+from orchestra import auth, git_ops, layout
 from orchestra.archive import merge_and_archive
 from orchestra.attempt import AttemptStore
 from orchestra.config import load_config
@@ -156,22 +156,14 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
     if state_dir_exists and state_dir_writable and executable and preflight == "passed":
         environment = os.environ.copy()
         environment.update(dict(envelope.environment))
-        try:
-            login_command = (
-                [harness.executable, "login", "status"] if harness.kind == "codex"
-                else [harness.executable, "auth", "status", "--json"]
-            )
-            result = subprocess.run(
-                login_command,
-                text=True,
-                capture_output=True,
-                timeout=15,
-                check=False,
-                env=environment,
-            )
-            login = "authenticated" if result.returncode == 0 else "not_authenticated"
-        except (OSError, subprocess.SubprocessError):
-            login = "not_authenticated"
+        # Doctor's login check runs against the SHARED home, and for Claude the check
+        # command *is* the refresh trigger: it rotates and persists the credential when the
+        # access token is near expiry, revoking the prior one. So it goes through the same
+        # lock the dispatch refresher holds — otherwise an operator running doctor mid-tick
+        # could rotate the token out from under a dispatch that is seeding it.
+        login = "authenticated" if auth.run_auth_status(
+            harness.kind, harness.executable, state_dir, environment
+        ) else "not_authenticated"
 
     instructions = "not_configured"
     if harness.kind == "codex" and harness.environment.instructions_file:
@@ -380,6 +372,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     else:
         print(f"slots used: {s['slots_used']}")
         print("counts: " + ", ".join(f"{k}={v}" for k, v in sorted(s["counts"].items())))
+        for name, record in sorted(s["auth_refresh"].items()):
+            if record.get("outcome") in {auth.FAILED, auth.HELD}:
+                print(
+                    f"auth: {name} refresh {record['outcome']} at {record.get('at', '')} "
+                    f"— {record.get('detail', '')}"
+                )
         for row in s["issues"]:
             _print_issue_row(row)
     return 0
