@@ -97,16 +97,19 @@ def _strip_refresh_token(credential_file: Path) -> None:
     token in the copy, a worker physically cannot rotate or revoke anything; its
     worst case is a clean 401 at true access-token expiry. Every other field,
     including unknown ones, is preserved. A missing file, a file with no
-    `claudeAiOauth.refreshToken`, or malformed JSON are all left untouched: the
-    credential schema is the harness's own external data, and a worker seeded from
-    a genuinely corrupt credential will simply fail auth on its own, which is a
-    more visible failure than crashing the launch here.
+    `claudeAiOauth.refreshToken`, valid-but-non-dict JSON (e.g. a bare list or
+    scalar), or malformed JSON are all left untouched: the credential schema is
+    the harness's own external data, and a worker seeded from a genuinely corrupt
+    credential will simply fail auth on its own, which is a more visible failure
+    than crashing the launch here.
     """
     if not credential_file.is_file():
         return
     try:
         data = json.loads(credential_file.read_text())
     except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
         return
     oauth = data.get("claudeAiOauth")
     if not isinstance(oauth, dict) or "refreshToken" not in oauth:

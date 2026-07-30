@@ -278,6 +278,40 @@ def test_seed_leaves_malformed_credential_json_untouched(tmp_path: Path):
     assert (session / ".credentials.json").read_text() == "not valid json{"
 
 
+def test_seed_leaves_non_dict_top_level_json_untouched(tmp_path: Path):
+    # Regression: valid JSON whose top level is not an object (list, string, number,
+    # bool, null) must not crash the seed via AttributeError on `.get` — it is
+    # "malformed" from the credential schema's point of view and must be left alone.
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    (source / ".credentials.json").write_text("[1, 2, 3]")
+    session = session_state_home(tmp_path, "claude", "attempt-non-dict")
+
+    seed_session_home(source, session)
+
+    assert (session / ".credentials.json").read_text() == "[1, 2, 3]"
+
+
+def test_seed_preserves_unknown_fields_at_top_level_and_inside_oauth(tmp_path: Path):
+    # The brief requires preserving unknown keys, not just the documented schema
+    # fields: one at the top level (sibling of claudeAiOauth) and one nested inside
+    # claudeAiOauth itself must both survive the strip untouched.
+    source = managed_auth_home(tmp_path, "claude", ".orchestra/homes/claude")
+    source.mkdir(parents=True)
+    credential = _credential_json()
+    credential["claudeAiOauth"]["futureOauthField"] = "unknown-oauth-value"
+    credential["futureTopLevelField"] = "unknown-top-level-value"
+    (source / ".credentials.json").write_text(json.dumps(credential))
+    session = session_state_home(tmp_path, "claude", "attempt-unknown-fields")
+
+    seed_session_home(source, session)
+
+    seeded = json.loads((session / ".credentials.json").read_text())
+    assert "refreshToken" not in seeded["claudeAiOauth"]
+    assert seeded["claudeAiOauth"]["futureOauthField"] == "unknown-oauth-value"
+    assert seeded["futureTopLevelField"] == "unknown-top-level-value"
+
+
 def test_seed_without_credential_file_still_seeds_other_files(tmp_path: Path):
     # A home without a credential file must seed exactly as before this change: no
     # crash, no file conjured up, other content copied normally.
