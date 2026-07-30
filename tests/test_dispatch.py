@@ -606,6 +606,72 @@ def test_dispatch_seeds_the_launch_home_under_the_credential_lock(tmp_path, monk
     _wait_all_dead(tmp_path)
 
 
+def test_dispatch_defers_the_launch_when_the_seed_time_lock_is_contended(
+    tmp_path, monkeypatch,
+):
+    """An operator-driven `harness doctor`/`harness login` can hold the credential lock for
+    as long as their terminal session takes. Dispatch must not stall the whole engine tick
+    behind it — contention defers just this launch to the next tick. Run in a thread with a
+    timeout so a regression to blocking behavior fails the test instead of hanging it."""
+    import fcntl
+    import threading
+
+    from orchestra import auth
+    import orchestra.dispatch as d
+
+    _setup(tmp_path, _issue(1, "open"))
+    (tmp_path / "config.yaml").write_text(ISOLATED_CONFIG)
+    source_home = _shared_credential(tmp_path, "shared-access-token")
+    cfg = load_config(tmp_path / "config.yaml")
+
+    holder = open(auth._lock_path(source_home), "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    result: dict = {}
+
+    def run():
+        result["launched"] = d.dispatch(tmp_path, cfg, started="t")
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(timeout=5)
+    still_blocked = thread.is_alive()
+    holder.close()
+    if still_blocked:
+        thread.join(timeout=5)
+
+    assert not still_blocked, "dispatch blocked on the contended credential lock at seed time"
+    assert result["launched"] == []
+    assert load_registry(tmp_path / ".orchestra" / "workers.json") == {}
+
+
+def test_dispatch_launches_on_the_next_tick_once_the_seed_time_lock_frees(
+    tmp_path, monkeypatch,
+):
+    """Deferring must not be a dead end: once the contending writer releases the lock, the
+    next tick launches normally."""
+    import fcntl
+
+    from orchestra import auth
+    import orchestra.dispatch as d
+
+    _setup(tmp_path, _issue(1, "open"))
+    (tmp_path / "config.yaml").write_text(ISOLATED_CONFIG)
+    source_home = _shared_credential(tmp_path, "shared-access-token")
+    cfg = load_config(tmp_path / "config.yaml")
+
+    holder = open(auth._lock_path(source_home), "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    first = d.dispatch(tmp_path, cfg, started="t1")
+    holder.close()
+
+    assert first == []
+    assert load_registry(tmp_path / ".orchestra" / "workers.json") == {}
+
+    second = d.dispatch(tmp_path, cfg, started="t2")
+    assert second == [issue_key("wf", 1)]
+    _wait_all_dead(tmp_path)
+
+
 def test_resume_seeds_the_parents_session_state_with_the_shared_token(tmp_path):
     """A resumed launch inherits the parent's transcript but NOT its aged access token:
     a per-launch copy has no refresh token, so its token only ages while the shared one is

@@ -35,8 +35,10 @@ _AUTH_STATUS_ARGUMENTS = {
     "claude": ("auth", "status", "--json"),
 }
 
-# Refresh outcomes. `HELD` is not produced here — the dispatch layer records it when a
-# needed refresh cannot run yet because workers of that harness are still in flight.
+# Refresh outcomes. `HELD` is produced here only for a non-blocking (`blocking=False`) lock
+# acquisition that hits contention with another writer (`harness doctor`/`harness login`);
+# the dispatch layer also records `HELD` itself when a needed refresh cannot run yet because
+# workers of that harness are still in flight.
 NOT_NEEDED = "not_needed"
 REFRESHED = "refreshed"
 FAILED = "failed"
@@ -81,21 +83,32 @@ def _lock_path(home: Path) -> Path:
 
 
 @contextmanager
-def credential_lock(home: Path) -> Iterator[None]:
-    """Blocking exclusive lock over one harness home's credential.
+def credential_lock(home: Path, *, blocking: bool = True) -> Iterator[bool]:
+    """Exclusive lock over one harness home's credential. Yields whether it was acquired.
 
-    Serializes every engine-side invocation that can rewrite the shared credential: the
-    dispatch refresher and `orchestra harness doctor` both run the same refresh-and-persist
-    command against the shared home. Blocking rather than try-lock, because neither caller
-    may proceed on a credential another writer is in the middle of rotating; the critical
-    section is a single CLI call bounded by `AUTH_STATUS_TIMEOUT`.
+    Serializes every writer that can rewrite the shared credential: `orchestra harness
+    doctor` and `orchestra harness login` (operator-driven, bounded by the operator's own
+    terminal — these use the default `blocking=True` and always yield `True`, waiting as
+    long as it takes) and the dispatch tick's refresh gate and seed-time copy (`blocking=
+    False` — an engine tick must never stall behind a slow or abandoned interactive login
+    holding this lock; on contention it yields `False` immediately instead of waiting, and
+    the caller defers that harness's work to the next tick). Mirrors `enginelock.engine_lock`
+    's non-blocking defer idiom.
     """
     path = _lock_path(home)
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(path, "w")
     try:
+        if not blocking:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            yield True
+            return
         fcntl.flock(handle, fcntl.LOCK_EX)
-        yield
+        yield True
     finally:
         handle.close()  # closing the descriptor releases the flock
 
@@ -295,7 +308,7 @@ def probe_shared_credential(home: Path, *, timeout: float = PROBE_TIMEOUT_SECOND
 
 
 def refresh_shared_credential(
-    kind: str, executable: str, home: Path, *, margin_seconds: int
+    kind: str, executable: str, home: Path, *, margin_seconds: int, blocking: bool = True
 ) -> RefreshOutcome:
     """Refresh a shared home's credential in place, as the engine's single writer.
 
@@ -308,12 +321,22 @@ def refresh_shared_credential(
     only honest success signal is the credential's own expiry moving forward, so that is
     what is checked. The refreshed credential is written by the harness itself; orchestra
     never rewrites the shared credential file.
+
+    `blocking=False` (the dispatch tick's use) never waits for a concurrent writer: an
+    operator-driven `harness doctor`/`harness login` can hold this lock for as long as its
+    terminal session takes, and a dispatch tick must not stall the whole engine behind that.
+    Contention then yields `HELD` immediately — the same outcome the caller already uses for
+    "workers still active" — so the caller defers this harness to the next tick instead.
     """
     command = auth_status_command(kind, executable)
     if command is None:
         return RefreshOutcome(NOT_NEEDED, f"{kind} exposes no auth-status command")
     environment = shared_home_environment(kind, home)
-    with credential_lock(home):
+    with credential_lock(home, blocking=blocking) as acquired:
+        if not acquired:
+            return RefreshOutcome(
+                HELD, "credential lock is held by another writer (doctor or login in progress)"
+            )
         before = access_expiry(home)
         if before is None or not _stale(before, margin_seconds, None):
             return RefreshOutcome(NOT_NEEDED)

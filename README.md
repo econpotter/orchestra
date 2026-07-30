@@ -121,7 +121,7 @@ successful doctor report before resuming unattended dispatch:
 
 ```sh
 orchestra harness setup codex
-# Run the exact CODEX_HOME=... codex login command that setup prints.
+orchestra harness login codex   # runs the CODEX_HOME=... codex login command interactively
 orchestra harness doctor codex
 ```
 

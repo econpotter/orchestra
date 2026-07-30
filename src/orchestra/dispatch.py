@@ -271,6 +271,12 @@ def _refresh_managed_credentials(
 
     The same holds for a home that cannot even be resolved or locked — one misconfigured
     harness must not crash the tick and skip reconcile for every other project.
+
+    The credential lock is taken non-blocking (`refresh_shared_credential(...,
+    blocking=False)`): an operator-driven `harness doctor`/`harness login` can hold it for as
+    long as their terminal session takes, and this gate runs on every dispatch tick, so it
+    must never wait — contention holds the harness for this tick (retried next tick) exactly
+    like the "workers still active" case above, rather than stalling the whole engine.
     """
     held: set[str] = set()
     for name in sorted(harness_names):
@@ -297,8 +303,17 @@ def _refresh_managed_credentials(
                 continue
             outcome = auth.refresh_shared_credential(
                 harness.kind, harness.executable, home,
-                margin_seconds=config.refresh_margin_seconds,
+                margin_seconds=config.refresh_margin_seconds, blocking=False,
             )
+            if outcome.action == auth.HELD:
+                held.add(name)
+                print(
+                    f"dispatch: holding {name} launches — credential lock is held by "
+                    "another writer (doctor or login in progress); retrying next tick",
+                    file=sys.stderr,
+                )
+                _record_auth_refresh(root, name, outcome, at=started)
+                continue
             if outcome.action == auth.FAILED:
                 # `margin_seconds=0` asks the narrower question "is the token dead *now*",
                 # not "is it inside the dispatch margin".
@@ -308,7 +323,7 @@ def _refresh_managed_credentials(
                         auth.FAILED,
                         f"{outcome.detail}; access token is expired — holding {name} "
                         f"dispatches until a refresh succeeds or the home is re-authenticated "
-                        f"(orchestra harness setup {name})",
+                        f"(orchestra harness login {name})",
                     )
                     print(
                         f"dispatch: WARNING shared {name} credential refresh failed and the "
@@ -549,8 +564,20 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
                             seed_home = parent_home
                     # Under the credential lock: `harness doctor` takes only this lock (not
                     # the engine lock), so without it a rotation could land mid-copy and seed
-                    # a torn or already-revoked credential.
-                    with auth.credential_lock(source_home):
+                    # a torn or already-revoked credential. Non-blocking: an operator-driven
+                    # `harness doctor`/`harness login` can hold this lock for as long as their
+                    # terminal session takes, and this runs on every dispatch tick under the
+                    # engine lock — it must never wait. Contention defers only THIS launch
+                    # (caught by the per-issue handler below, same as any other launch
+                    # failure); the issue was never added to the registry, so the next tick
+                    # simply retries it once the lock frees.
+                    with auth.credential_lock(source_home, blocking=False) as acquired:
+                        if not acquired:
+                            raise RuntimeError(
+                                f"credential lock for {role_cfg.harness} is held by another "
+                                "writer (doctor or login in progress); deferring this launch "
+                                "to the next tick"
+                            )
                         seed_session_home(seed_home, session_home)
                         if seed_home != source_home:
                             reseed_credentials(source_home, session_home)

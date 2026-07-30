@@ -204,6 +204,31 @@ def test_credential_lock_is_exclusive_and_lives_outside_the_home(tmp_path: Path)
         released.close()
 
 
+def test_credential_lock_non_blocking_acquires_when_free(tmp_path: Path):
+    home = tmp_path / "homes" / "claude"
+    home.mkdir(parents=True)
+
+    with auth.credential_lock(home, blocking=False) as acquired:
+        assert acquired is True
+
+
+def test_credential_lock_non_blocking_yields_false_on_contention_without_waiting(
+    tmp_path: Path,
+):
+    """The dispatch tick's use: an operator-driven `harness doctor`/`harness login` can hold
+    this lock for as long as their terminal takes, so a non-blocking caller must get an
+    immediate answer, never wait for it to free."""
+    home = tmp_path / "homes" / "claude"
+    home.mkdir(parents=True)
+    holder = open(auth._lock_path(home), "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        with auth.credential_lock(home, blocking=False) as acquired:
+            assert acquired is False
+    finally:
+        holder.close()
+
+
 # --- refresh ----------------------------------------------------------------------
 
 
@@ -344,6 +369,42 @@ def test_refresh_is_a_no_op_for_a_harness_without_an_auth_status_command(
 
     assert outcome.action == auth.NOT_NEEDED
     assert invocations == []
+
+
+def test_refresh_non_blocking_yields_held_on_contention_without_blocking(
+    tmp_path: Path, monkeypatch,
+):
+    """`blocking=False` is dispatch's mode: it must report contention immediately (HELD)
+    rather than wait for a concurrent `harness doctor`/`harness login` to release the lock.
+    Run in a thread with a timeout so a regression to blocking behavior fails the test
+    instead of hanging it."""
+    home = tmp_path / "homes" / "claude"
+    _write_credential(home, expires_in=600)
+
+    def _refuse(command, environment):
+        raise AssertionError("a held (contended) refresh must not run the trigger at all")
+
+    monkeypatch.setattr(auth, "run_auth_status_command", _refuse)
+
+    holder = open(auth._lock_path(home), "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    result: dict = {}
+
+    def attempt():
+        result["outcome"] = auth.refresh_shared_credential(
+            "claude", "claude", home, margin_seconds=18000, blocking=False,
+        )
+
+    thread = threading.Thread(target=attempt)
+    thread.start()
+    thread.join(timeout=5)
+    still_blocked = thread.is_alive()
+    holder.close()
+    if still_blocked:
+        thread.join(timeout=5)
+
+    assert not still_blocked, "non-blocking refresh blocked on the contended lock"
+    assert result["outcome"].action == auth.HELD
 
 
 # --- revocation probe --------------------------------------------------------------
@@ -710,6 +771,10 @@ def test_gate_holds_when_the_refresh_failed_and_the_token_is_already_expired(
     record = _record(tmp_path)["claude"]
     assert record["outcome"] == auth.FAILED
     assert "holding claude dispatches" in record["detail"]
+    # The remedy must name the command that actually re-authenticates. `harness setup` only
+    # prepares the isolated directory; `harness login` is what this situation needs.
+    assert "orchestra harness login claude" in record["detail"]
+    assert "orchestra harness setup" not in record["detail"]
 
 
 def test_gate_retries_the_refresh_on_the_next_tick_while_held(tmp_path: Path, monkeypatch):
@@ -736,4 +801,72 @@ def test_gate_retries_the_refresh_on_the_next_tick_while_held(tmp_path: Path, mo
         tmp_path, config, {}, {"claude"}, started=started
     ) == set()
     assert attempts["n"] == 2
+    assert _record(tmp_path)["claude"]["outcome"] == auth.REFRESHED
+
+
+def test_gate_defers_a_harness_when_the_credential_lock_is_contended(
+    tmp_path: Path, monkeypatch, capsys,
+):
+    """A dispatch tick must never block behind a slow or abandoned interactive `harness
+    doctor`/`harness login` holding the credential lock: on contention the gate defers this
+    harness's launches to the next tick instead of waiting. Run in a thread with a timeout
+    so a regression to blocking behavior fails the test instead of hanging it."""
+    import threading
+
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=600)
+
+    def _refuse(command, environment):
+        raise AssertionError("a held (contended) refresh must not run the trigger at all")
+
+    monkeypatch.setattr(auth, "run_auth_status_command", _refuse)
+
+    holder = open(auth._lock_path(_shared_home(tmp_path)), "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    result: dict = {}
+
+    def attempt():
+        result["held"] = _refresh_managed_credentials(
+            tmp_path, config, {}, {"claude"}, started="2026-07-30T00:00:00+00:00"
+        )
+
+    thread = threading.Thread(target=attempt)
+    thread.start()
+    thread.join(timeout=5)
+    still_blocked = thread.is_alive()
+    holder.close()
+    if still_blocked:
+        thread.join(timeout=5)
+
+    assert not still_blocked, "the gate blocked on the contended credential lock"
+    assert result["held"] == {"claude"}
+    assert _record(tmp_path)["claude"]["outcome"] == auth.HELD
+    assert "holding claude launches" in capsys.readouterr().err
+
+
+def test_gate_proceeds_on_the_next_tick_once_the_contended_lock_frees(
+    tmp_path: Path, refreshing_runner,
+):
+    """Not just "doesn't block" — the deferred refresh must actually happen once the
+    contending writer releases the lock, on the very next tick."""
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=600)
+
+    holder = open(auth._lock_path(_shared_home(tmp_path)), "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    first = _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+    holder.close()
+
+    assert first == {"claude"}
+    assert refreshing_runner == []
+    assert _record(tmp_path)["claude"]["outcome"] == auth.HELD
+
+    second = _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started="2026-07-30T00:00:01+00:00"
+    )
+
+    assert second == set()
+    assert refreshing_runner == [["claude", "auth", "status", "--json"]]
     assert _record(tmp_path)["claude"]["outcome"] == auth.REFRESHED
