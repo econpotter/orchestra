@@ -182,6 +182,44 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
                 harness.kind, harness.executable, state_dir, environment
             ) else "not_authenticated"
 
+    # Expiry readout and revocation probe are Claude-specific (the credential shape and the
+    # probe endpoint are both the Claude OAuth home's). File reads never mutate anything, so
+    # they run regardless of `login`; the probe is a live HTTPS call, so it only runs once
+    # the auth-status path above has actually run (`login` is "authenticated" or
+    # "not_authenticated") — never in the not_checked_workers_active refusal path (rotation
+    # is what's being avoided there, and freshness is unknown), and never when `--no-probe`
+    # asks for zero network access.
+    access_at, access_days = (None, None)
+    refresh_at, refresh_days = (None, None)
+    refresh_warning = False
+    probe = "not_applicable"
+    if harness.kind == "claude":
+        access_at, access_days = auth.describe_expiry(auth.access_expiry(state_dir))
+        refresh_at, refresh_days = auth.describe_expiry(auth.refresh_expiry(state_dir))
+        refresh_warning = refresh_days is not None and refresh_days < auth.REFRESH_WARNING_DAYS
+        if args.no_probe:
+            probe = "disabled"
+        elif login in ("authenticated", "not_authenticated"):
+            probe = auth.probe_shared_credential(state_dir)
+        elif login == "not_checked_workers_active":
+            probe = "skipped_workers_active"
+        else:
+            probe = "not_checked"
+
+    if refresh_warning:
+        print(
+            f"WARNING: harness {args.name!r} refresh token expires in "
+            f"{refresh_days:.1f} day(s) (< {auth.REFRESH_WARNING_DAYS}-day threshold); "
+            "re-authenticate soon with `orchestra harness login claude`.",
+            file=sys.stderr,
+        )
+    if probe == auth.REVOKED:
+        print(
+            f"harness {args.name!r}: the access token has been revoked server-side; "
+            "run `orchestra harness login claude` to re-authenticate.",
+            file=sys.stderr,
+        )
+
     instructions = "not_configured"
     if harness.kind == "codex" and harness.environment.instructions_file:
         target = state_dir / "AGENTS.md"
@@ -200,7 +238,7 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
 
     ready = all((state_dir_exists, state_dir_writable, executable, preflight == "passed",
                  state_dir_private, login == "authenticated",
-                 instructions in {"not_configured", "current"}))
+                 instructions in {"not_configured", "current"}, probe != auth.REVOKED))
     report = {
         "name": args.name,
         "kind": harness.kind,
@@ -213,6 +251,12 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
         "version": version,
         "preflight": preflight,
         "login": login,
+        "access_token_expires_at": access_at,
+        "access_token_expires_in_days": access_days,
+        "refresh_token_expires_at": refresh_at,
+        "refresh_token_expires_in_days": refresh_days,
+        "refresh_token_warning": refresh_warning,
+        "probe": probe,
         "instructions": instructions,
         "ready": ready,
     }
@@ -867,6 +911,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_harness_doctor.add_argument("name")
     p_harness_doctor.add_argument("--json", action="store_true")
+    p_harness_doctor.add_argument(
+        "--no-probe", action="store_true",
+        help="skip the Claude revocation probe (no network access)",
+    )
     p_harness_doctor.set_defaults(func=cmd_harness_doctor)
 
     p_engine = sub.add_parser("engine", help="diagnose the installed Orchestra engine")

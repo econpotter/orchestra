@@ -6,10 +6,14 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 # The harness's own credential file, at the ROOT of the config dir. `CLAUDE_CONFIG_DIR`
 # makes this file authoritative: the CLI reads and rewrites it directly, never the nested
@@ -18,6 +22,11 @@ from pathlib import Path
 CREDENTIAL_FILE = ".credentials.json"
 
 AUTH_STATUS_TIMEOUT = 15
+
+# `harness doctor`'s expiry readout warns once the refresh-token horizon (the ~30-day point
+# past which no refresh is possible at all, requiring `orchestra harness login`) is this
+# close.
+REFRESH_WARNING_DAYS = 5
 
 _HOME_VARIABLE = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
 
@@ -91,13 +100,12 @@ def credential_lock(home: Path) -> Iterator[None]:
         handle.close()  # closing the descriptor releases the flock
 
 
-def access_expiry(home: Path) -> float | None:
-    """Epoch SECONDS at which this home's OAuth access token expires, or None.
+def _oauth_field(home: Path, field: str) -> object | None:
+    """The raw `claudeAiOauth.<field>` value from `home`'s credential file, or None.
 
     None means "cannot determine": no credential file, an unreadable one, malformed JSON,
-    or a missing/non-numeric `claudeAiOauth.expiresAt`. The credential schema is the
-    harness's own external data, so each of those is a loud warning and a skipped refresh
-    decision, never a crash. The stored value is epoch MILLIseconds.
+    or a missing field. The credential schema is the harness's own external data, so each
+    of those is a loud warning, never a crash.
     """
     path = credential_path(home)
     try:
@@ -114,11 +122,60 @@ def access_expiry(home: Path) -> float | None:
         _warn(f"{path} is not valid JSON: {exc}")
         return None
     oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
-    expires_at = oauth.get("expiresAt") if isinstance(oauth, dict) else None
-    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
-        _warn(f"{path} has no usable claudeAiOauth.expiresAt; cannot determine token expiry")
+    if not isinstance(oauth, dict):
+        _warn(f"{path} has no usable claudeAiOauth object; cannot determine token expiry")
         return None
-    return expires_at / 1000.0
+    return oauth.get(field)
+
+
+def _oauth_expiry(home: Path, field: str) -> float | None:
+    """Epoch SECONDS for a `claudeAiOauth.<field>` expiry, or None if undeterminable.
+
+    The stored value is epoch MILLIseconds.
+    """
+    value = _oauth_field(home, field)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        path = credential_path(home)
+        _warn(f"{path} has no usable claudeAiOauth.{field}; cannot determine token expiry")
+        return None
+    return value / 1000.0
+
+
+def access_expiry(home: Path) -> float | None:
+    """Epoch SECONDS at which this home's OAuth access token expires, or None (see
+    `_oauth_expiry`)."""
+    return _oauth_expiry(home, "expiresAt")
+
+
+def refresh_expiry(home: Path) -> float | None:
+    """Epoch SECONDS at which this home's OAuth refresh token expires, or None (see
+    `_oauth_expiry`). This is the ~30-day horizon past which no refresh is possible at all
+    and the operator must re-authenticate (`orchestra harness login`)."""
+    return _oauth_expiry(home, "refreshTokenExpiresAt")
+
+
+def access_token(home: Path) -> str | None:
+    """The raw OAuth access token VALUE from `home`'s credential file, or None.
+
+    Read only so `harness doctor` can send it once as the revocation probe's Authorization
+    header over HTTPS. Never log, print, or persist this value — callers must not either.
+    Silent (no `_warn`) on any parse failure: `access_expiry`/`refresh_expiry` already warn
+    about a broken credential file when doctor reads it for the expiry readout.
+    """
+    value = _oauth_field(home, "accessToken")
+    return value if isinstance(value, str) and value else None
+
+
+def describe_expiry(
+    expiry: float | None, *, now: float | None = None
+) -> tuple[str | None, float | None]:
+    """(ISO 8601 UTC timestamp, days-remaining) for an epoch-seconds expiry, or (None, None)
+    when the expiry itself is undeterminable. Used by `harness doctor`'s expiry readout."""
+    if expiry is None:
+        return None, None
+    reference = time.time() if now is None else now
+    at = datetime.fromtimestamp(expiry, tz=timezone.utc).isoformat()
+    return at, (expiry - reference) / 86400.0
 
 
 def _stale(expiry: float, margin_seconds: int, now: float | None) -> bool:
@@ -177,6 +234,59 @@ def run_auth_status(
         return False
     with credential_lock(home):
         return run_auth_status_command(command, environment) == 0
+
+
+# Revocation probe (docs/notes/2026-07-30-refresh-trigger-spike.md section 3): a purpose-built
+# authenticated GET the Claude CLI itself uses to answer "is this token still good." Identified
+# statically from the installed binary and never yet exercised, so every outcome other than an
+# explicit 2xx/401/403 is treated as indeterminate, never as a definitive answer.
+PROBE_URL = "https://api.anthropic.com/api/oauth/validate"
+PROBE_TIMEOUT_SECONDS = 5.0
+
+VALID = "valid"
+REVOKED = "revoked"
+UNREACHABLE = "unreachable"
+NO_CREDENTIAL = "no_credential"
+
+
+def _open_probe(access_token_value: str, timeout: float) -> Any:
+    """The single seam every revocation-probe invocation goes through, so tests can replace
+    it and never send a real HTTP request carrying a real access token."""
+    request = urllib.request.Request(
+        PROBE_URL, headers={"Authorization": f"Bearer {access_token_value}"},
+    )
+    return urllib.request.urlopen(request, timeout=timeout)  # fixed https:// URL, not user input
+
+
+def probe_access_token(
+    access_token_value: str, *, timeout: float = PROBE_TIMEOUT_SECONDS
+) -> str:
+    """valid / revoked / unreachable for one access token.
+
+    A 2xx response is `valid`; an explicit 401 or 403 is `revoked`. Everything else —
+    timeout, network error, 5xx, or an unexpected 4xx — is `unreachable`: the endpoint's
+    behavior was identified from binary strings only and never exercised live, so anything
+    short of an unambiguous auth failure is treated as indeterminate, never as `revoked`.
+    `unreachable` is a warning; it must never cause `harness doctor` to fail.
+
+    The token value is used only as this one request's Authorization header over HTTPS —
+    never logged, printed, or written anywhere.
+    """
+    try:
+        with _open_probe(access_token_value, timeout):
+            return VALID
+    except urllib.error.HTTPError as exc:
+        return REVOKED if exc.code in (401, 403) else UNREACHABLE
+    except (urllib.error.URLError, OSError, ValueError):
+        return UNREACHABLE
+
+
+def probe_shared_credential(home: Path, *, timeout: float = PROBE_TIMEOUT_SECONDS) -> str:
+    """valid / revoked / unreachable / no_credential for `home`'s current access token."""
+    token = access_token(home)
+    if token is None:
+        return NO_CREDENTIAL
+    return probe_access_token(token, timeout=timeout)
 
 
 def refresh_shared_credential(

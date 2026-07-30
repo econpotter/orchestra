@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from orchestra.attempt import AttemptStore
 from orchestra.cli import main
 
@@ -195,6 +197,12 @@ def test_harness_doctor_json_checks_preflight_and_isolated_login(
         "version": "codex-cli 9.9",
         "preflight": "passed",
         "login": "authenticated",
+        "access_token_expires_at": None,
+        "access_token_expires_in_days": None,
+        "refresh_token_expires_at": None,
+        "refresh_token_expires_in_days": None,
+        "refresh_token_warning": False,
+        "probe": "not_applicable",
         "instructions": "not_configured",
         "ready": True,
     }
@@ -369,8 +377,9 @@ harnesses:
 """
 
 
-def _doctor_setup(root, monkeypatch, *, expires_in):
-    """An isolated Claude harness with a synthetic credential `expires_in` seconds out."""
+def _doctor_setup(root, monkeypatch, *, expires_in, refresh_expires_in=30 * 86400):
+    """An isolated Claude harness with a synthetic credential `expires_in` seconds out
+    (access token) and `refresh_expires_in` seconds out (refresh token)."""
     import json
     import time
 
@@ -384,7 +393,7 @@ def _doctor_setup(root, monkeypatch, *, expires_in):
     (state_dir / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
         "accessToken": "a", "refreshToken": "r",
         "expiresAt": int((time.time() + expires_in) * 1000),
-        "refreshTokenExpiresAt": int((time.time() + 30 * 86400) * 1000),
+        "refreshTokenExpiresAt": int((time.time() + refresh_expires_in) * 1000),
     }}))
     monkeypatch.setattr(cli, "preflight_harness", lambda kind, executable: "claude 9.9")
     monkeypatch.setattr(cli.shutil, "which", lambda executable: "/usr/bin/claude")
@@ -428,11 +437,17 @@ def test_harness_doctor_refuses_to_rotate_while_workers_are_active(
         lambda command, environment: calls.append(command) or 0,
     )
 
+    def _refuse(home):
+        raise AssertionError("the probe must not run in the workers-active refusal path")
+
+    monkeypatch.setattr(auth, "probe_shared_credential", _refuse)
+
     assert main([
         "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
     ]) == 1
     report = json.loads(capsys.readouterr().out)
     assert report["login"] == "not_checked_workers_active"
+    assert report["probe"] == "skipped_workers_active"
     assert report["ready"] is False
     assert calls == []
     # The credential is left exactly as it was.
@@ -454,10 +469,14 @@ def test_harness_doctor_checks_login_once_the_harness_has_drained(
         lambda command, environment: calls.append(command) or 0,
     )
 
+    # Doctor's authenticated-login path also runs the revocation probe by default; --no-probe
+    # keeps this test (which is about the drain/login gating, not the probe) off the network.
     assert main([
-        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json", "--no-probe",
     ]) == 0
-    assert json.loads(capsys.readouterr().out)["login"] == "authenticated"
+    report = json.loads(capsys.readouterr().out)
+    assert report["login"] == "authenticated"
+    assert report["probe"] == "disabled"
     assert calls == [["claude", "auth", "status", "--json"]]
 
 
@@ -479,7 +498,166 @@ def test_harness_doctor_stays_usable_while_the_token_has_life_left(
     )
 
     assert main([
-        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json", "--no-probe",
     ]) == 0
     assert json.loads(capsys.readouterr().out)["login"] == "authenticated"
     assert calls == [["claude", "auth", "status", "--json"]]
+
+
+# --- expiry readout and revocation probe -------------------------------------------
+
+
+def test_harness_doctor_reports_expiry_readout_with_days_remaining(
+    tmp_path, monkeypatch, capsys,
+):
+    from orchestra import auth
+
+    _doctor_setup(tmp_path, monkeypatch, expires_in=40000, refresh_expires_in=20 * 86400)
+    monkeypatch.setattr(auth, "run_auth_status_command", lambda command, environment: 0)
+    monkeypatch.setattr(auth, "probe_shared_credential", lambda home: auth.VALID)
+
+    assert main([
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+    ]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["access_token_expires_at"] is not None
+    assert report["access_token_expires_in_days"] == pytest.approx(40000 / 86400, abs=0.01)
+    assert report["refresh_token_expires_at"] is not None
+    assert report["refresh_token_expires_in_days"] == pytest.approx(20.0, abs=0.01)
+    assert report["refresh_token_warning"] is False
+    assert report["probe"] == "valid"
+
+
+def test_harness_doctor_warns_when_the_refresh_horizon_is_close(
+    tmp_path, monkeypatch, capsys,
+):
+    from orchestra import auth
+
+    _doctor_setup(tmp_path, monkeypatch, expires_in=40000, refresh_expires_in=3 * 86400)
+    monkeypatch.setattr(auth, "run_auth_status_command", lambda command, environment: 0)
+    monkeypatch.setattr(auth, "probe_shared_credential", lambda home: auth.VALID)
+
+    assert main([
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+    ]) == 0
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["refresh_token_warning"] is True
+    assert "WARNING" in captured.err
+    assert "refresh token expires" in captured.err
+
+
+def test_harness_doctor_reports_revoked_and_the_exit_code_is_nonzero(
+    tmp_path, monkeypatch, capsys,
+):
+    from orchestra import auth
+
+    _doctor_setup(tmp_path, monkeypatch, expires_in=40000)
+    monkeypatch.setattr(auth, "run_auth_status_command", lambda command, environment: 0)
+    monkeypatch.setattr(auth, "probe_shared_credential", lambda home: auth.REVOKED)
+
+    assert main([
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+    ]) == 1
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["probe"] == "revoked"
+    assert report["ready"] is False
+    assert "orchestra harness login claude" in captured.err
+
+
+def test_harness_doctor_probe_unreachable_is_a_warning_not_a_failure(
+    tmp_path, monkeypatch, capsys,
+):
+    from orchestra import auth
+
+    _doctor_setup(tmp_path, monkeypatch, expires_in=40000)
+    monkeypatch.setattr(auth, "run_auth_status_command", lambda command, environment: 0)
+    monkeypatch.setattr(auth, "probe_shared_credential", lambda home: auth.UNREACHABLE)
+
+    assert main([
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+    ]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["probe"] == "unreachable"
+    assert report["ready"] is True
+
+
+def test_harness_doctor_no_probe_skips_the_network_entirely(
+    tmp_path, monkeypatch, capsys,
+):
+    from orchestra import auth
+
+    _doctor_setup(tmp_path, monkeypatch, expires_in=40000)
+    monkeypatch.setattr(auth, "run_auth_status_command", lambda command, environment: 0)
+
+    def _refuse(home):
+        raise AssertionError("--no-probe must not touch the network")
+
+    monkeypatch.setattr(auth, "probe_shared_credential", _refuse)
+
+    assert main([
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json", "--no-probe",
+    ]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["probe"] == "disabled"
+
+
+def test_harness_doctor_probe_is_not_checked_when_the_auth_status_path_never_ran(
+    tmp_path, monkeypatch, capsys,
+):
+    """A Claude harness whose executable can't be found never enters the auth-status branch
+    at all (`login` stays "not_checked"); the probe must not run either — there is no
+    meaningfully current token to say anything about."""
+    import orchestra.cli as cli
+    from orchestra import auth
+
+    _doctor_setup(tmp_path, monkeypatch, expires_in=40000)
+    monkeypatch.setattr(cli.shutil, "which", lambda executable: None)
+
+    def _refuse(home):
+        raise AssertionError("the probe must not run when the auth-status path never ran")
+
+    monkeypatch.setattr(auth, "probe_shared_credential", _refuse)
+
+    assert main([
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+    ]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["login"] == "not_checked"
+    assert report["probe"] == "not_checked"
+
+
+def test_harness_doctor_probe_never_prints_the_access_token_value(
+    tmp_path, monkeypatch, capsys,
+):
+    """Faking at the `_open_probe` seam (rather than `probe_shared_credential`) exercises
+    doctor's full read-credential-and-probe path, so this actually proves the token value
+    read from disk never reaches stdout or stderr."""
+    import time as _time
+    import urllib.error
+
+    from orchestra import auth
+
+    state_dir = _doctor_setup(tmp_path, monkeypatch, expires_in=40000)
+    (state_dir / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": "very-secret-access-token-value",
+        "refreshToken": "r",
+        "expiresAt": int((_time.time() + 40000) * 1000),
+        "refreshTokenExpiresAt": int((_time.time() + 30 * 86400) * 1000),
+    }}))
+    monkeypatch.setattr(auth, "run_auth_status_command", lambda command, environment: 0)
+
+    def fake_open_probe(token, timeout):
+        assert token == "very-secret-access-token-value"
+        raise urllib.error.HTTPError(auth.PROBE_URL, 401, "unauthorized", {}, None)
+
+    monkeypatch.setattr(auth, "_open_probe", fake_open_probe)
+
+    assert main([
+        "--root", str(tmp_path), "harness", "doctor", "automation", "--json",
+    ]) == 1
+    out = capsys.readouterr()
+    assert "very-secret-access-token-value" not in out.out
+    assert "very-secret-access-token-value" not in out.err
+    assert json.loads(out.out)["probe"] == "revoked"

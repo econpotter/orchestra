@@ -7,11 +7,13 @@ ever touched (a stray real refresh revokes the operator's live fleet token).
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
 import threading
 import time
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -75,6 +77,84 @@ def test_access_expiry_is_undeterminable_and_warns(tmp_path: Path, capsys, paylo
 
     assert auth.access_expiry(home) is None
     assert "auth:" in capsys.readouterr().err
+
+
+def test_refresh_expiry_reads_epoch_milliseconds(tmp_path: Path):
+    home = tmp_path / "homes" / "claude"
+    _write_credential(home, expires_in=3600, refresh_in=30 * 86400, now=1_000_000.0)
+    assert auth.refresh_expiry(home) == pytest.approx(1_000_000.0 + 30 * 86400)
+
+
+@pytest.mark.parametrize("payload", [
+    None,                                                              # no file at all
+    "{not json",                                                       # malformed
+    json.dumps({"claudeAiOauth": {"accessToken": "x"}}),               # no refreshTokenExpiresAt
+    json.dumps({"claudeAiOauth": {"refreshTokenExpiresAt": "soon"}}),  # non-numeric
+    json.dumps({"claudeAiOauth": {"refreshTokenExpiresAt": True}}),    # bool is not an expiry
+])
+def test_refresh_expiry_is_undeterminable_and_warns(tmp_path: Path, capsys, payload):
+    home = tmp_path / "homes" / "claude"
+    home.mkdir(parents=True)
+    if payload is not None:
+        auth.credential_path(home).write_text(payload)
+
+    assert auth.refresh_expiry(home) is None
+    assert "auth:" in capsys.readouterr().err
+
+
+def test_describe_expiry_is_none_for_an_undeterminable_expiry():
+    assert auth.describe_expiry(None) == (None, None)
+
+
+def test_describe_expiry_computes_days_remaining_and_an_iso_timestamp():
+    now = 1_000_000.0
+    at, days = auth.describe_expiry(now + 5 * 86400, now=now)
+    assert days == pytest.approx(5.0)
+    assert at == "1970-01-17T13:46:40+00:00"
+
+
+def test_describe_expiry_reports_negative_days_once_past_expiry():
+    now = 1_000_000.0
+    _at, days = auth.describe_expiry(now - 86400, now=now)
+    assert days == pytest.approx(-1.0)
+
+
+@pytest.mark.parametrize(("days_out", "expected_warning"), [
+    (auth.REFRESH_WARNING_DAYS + 1, False),   # comfortably outside the threshold
+    (auth.REFRESH_WARNING_DAYS, False),       # exactly at the threshold: not yet inside it
+    (auth.REFRESH_WARNING_DAYS - 0.5, True),  # inside the threshold
+    (-1, True),                               # already past the refresh horizon
+])
+def test_refresh_warning_threshold(days_out, expected_warning):
+    now = 1_000_000.0
+    _at, days = auth.describe_expiry(now + days_out * 86400, now=now)
+    assert (days < auth.REFRESH_WARNING_DAYS) is expected_warning
+
+
+# --- access token value -------------------------------------------------------------
+
+
+def test_access_token_reads_the_value(tmp_path: Path):
+    home = tmp_path / "homes" / "claude"
+    _write_credential(home, expires_in=3600)
+    assert auth.access_token(home) == "synthetic-access"
+
+
+@pytest.mark.parametrize("payload", [
+    None,                                                       # no file at all
+    "{not json",                                                # malformed
+    json.dumps({}),                                             # no oauth block
+    json.dumps({"claudeAiOauth": {"expiresAt": 1}}),            # no accessToken
+    json.dumps({"claudeAiOauth": {"accessToken": ""}}),         # empty string
+    json.dumps({"claudeAiOauth": {"accessToken": 12345}}),      # not a string
+])
+def test_access_token_is_none_for_malformed_or_missing_credential(tmp_path: Path, payload):
+    home = tmp_path / "homes" / "claude"
+    home.mkdir(parents=True)
+    if payload is not None:
+        auth.credential_path(home).write_text(payload)
+
+    assert auth.access_token(home) is None
 
 
 # --- margin arithmetic ------------------------------------------------------------
@@ -264,6 +344,100 @@ def test_refresh_is_a_no_op_for_a_harness_without_an_auth_status_command(
 
     assert outcome.action == auth.NOT_NEEDED
     assert invocations == []
+
+
+# --- revocation probe --------------------------------------------------------------
+#
+# Every test here replaces `auth._open_probe`, the one seam that would open a real HTTPS
+# connection, so no test ever sends a real request to api.anthropic.com.
+
+
+def test_probe_access_token_is_valid_on_a_2xx_response(monkeypatch):
+    monkeypatch.setattr(
+        auth, "_open_probe", lambda token, timeout: contextlib.nullcontext(object())
+    )
+    assert auth.probe_access_token("secret-token-value") == auth.VALID
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_probe_access_token_is_revoked_on_401_or_403(monkeypatch, code):
+    def fake(token, timeout):
+        raise urllib.error.HTTPError("https://api.anthropic.com/api/oauth/validate",
+                                      code, "unauthorized", {}, None)
+
+    monkeypatch.setattr(auth, "_open_probe", fake)
+    assert auth.probe_access_token("secret-token-value") == auth.REVOKED
+
+
+@pytest.mark.parametrize("code", [400, 404, 429, 500, 503])
+def test_probe_access_token_is_unreachable_on_an_unexpected_http_status(monkeypatch, code):
+    def fake(token, timeout):
+        raise urllib.error.HTTPError("https://api.anthropic.com/api/oauth/validate",
+                                      code, "error", {}, None)
+
+    monkeypatch.setattr(auth, "_open_probe", fake)
+    assert auth.probe_access_token("secret-token-value") == auth.UNREACHABLE
+
+
+def test_probe_access_token_is_unreachable_on_a_network_error(monkeypatch):
+    def fake(token, timeout):
+        raise urllib.error.URLError("name resolution failed")
+
+    monkeypatch.setattr(auth, "_open_probe", fake)
+    assert auth.probe_access_token("secret-token-value") == auth.UNREACHABLE
+
+
+def test_probe_access_token_is_unreachable_on_a_timeout(monkeypatch):
+    def fake(token, timeout):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(auth, "_open_probe", fake)
+    assert auth.probe_access_token("secret-token-value") == auth.UNREACHABLE
+
+
+def test_probe_access_token_never_leaks_the_token_value(monkeypatch, capsys):
+    """The token must reach the probe only via the Authorization header of the one HTTPS
+    request — never be logged, printed, or surfaced in any exception message."""
+    seen = {}
+
+    def fake(token, timeout):
+        seen["token"] = token
+        raise urllib.error.HTTPError("https://api.anthropic.com/api/oauth/validate",
+                                      401, "unauthorized", {}, None)
+
+    monkeypatch.setattr(auth, "_open_probe", fake)
+    result = auth.probe_access_token("top-secret-value")
+
+    assert result == auth.REVOKED
+    assert seen["token"] == "top-secret-value"
+    out = capsys.readouterr()
+    assert "top-secret-value" not in out.out
+    assert "top-secret-value" not in out.err
+
+
+def test_probe_shared_credential_is_no_credential_when_the_home_has_no_access_token(
+    tmp_path: Path,
+):
+    home = tmp_path / "homes" / "claude"
+    home.mkdir(parents=True)
+    assert auth.probe_shared_credential(home) == auth.NO_CREDENTIAL
+
+
+def test_probe_shared_credential_probes_the_homes_own_access_token(
+    tmp_path: Path, monkeypatch,
+):
+    home = tmp_path / "homes" / "claude"
+    _write_credential(home, expires_in=3600)
+    seen = {}
+
+    def fake(token, *, timeout=auth.PROBE_TIMEOUT_SECONDS):
+        seen["token"] = token
+        return auth.VALID
+
+    monkeypatch.setattr(auth, "probe_access_token", fake)
+
+    assert auth.probe_shared_credential(home) == auth.VALID
+    assert seen["token"] == "synthetic-access"
 
 
 # --- the dispatch-boundary gate ---------------------------------------------------
