@@ -10,7 +10,7 @@ from orchestra.attempt import Attempt, AttemptStore
 from orchestra.config import Config
 from orchestra.dispatch import done_numbers
 from orchestra.enginelock import engine_lock
-from orchestra.issue import block_issue, exception_detail, needs_network_approval
+from orchestra.issue import KNOWN_STATUSES, block_issue, exception_detail, needs_network_approval
 from orchestra.projects import Project, find_project, read_projects
 from orchestra.queue import find_issue, read_queue, write_queue
 from orchestra.registry import issue_key, load_registry, save_registry
@@ -281,7 +281,11 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
                 transitions.append((issue_key(project.name, issue.number), "held"))
                 changed = True
                 continue
-            if issue.status != "open":
+            # An unrecognized status (e.g. a hand-written "ready") maps to no role in
+            # selection.ROLE_FOR_STATUS, so dispatch silently skips it forever — this is the
+            # only place left that still looks at it, so a bad status must fall through to
+            # validate_structural instead of being screened out by the `!= "open"` check.
+            if issue.status != "open" and issue.status in KNOWN_STATUSES:
                 continue
             validation = validate_structural(
                 issue, project_path=project.path, orchestra_root=root,

@@ -180,6 +180,24 @@ def test_base_branch_spec_committed_ok(tmp_path):
     assert res.ok is True
 
 
+def test_unknown_status_blocks(tmp_path):
+    text = GOOD.replace("Status: open", "Status: ready")
+    res = validate_structural(_issue(text), project_path="projects/wf",
+                              orchestra_root=tmp_path, known_ids=set())
+    assert res.ok is False
+    assert any("unknown status 'ready'" in r and "orchestra issue add" in r
+               for r in res.reasons)
+
+
+def test_known_status_does_not_trigger_unknown_status_reason(tmp_path):
+    (tmp_path / "projects" / "wf" / "docs" / "specs").mkdir(parents=True)
+    (tmp_path / "projects" / "wf" / "docs" / "specs" / "x.md").write_text("spec")
+    text = GOOD.replace("Status: open", "Status: blocked")
+    res = validate_structural(_issue(text), project_path="projects/wf",
+                              orchestra_root=tmp_path, known_ids=set())
+    assert not any("unknown status" in r for r in res.reasons)
+
+
 def test_base_branch_spec_on_disk_but_uncommitted_blocks(tmp_path):
     """The exact failure mode: file on disk in the root checkout, NOT in the base branch
     a worker branches off — must be flagged (was silently passing the on-disk check)."""

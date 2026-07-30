@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from orchestra import git_ops
-from orchestra.issue import Issue
+from orchestra.issue import KNOWN_STATUSES, Issue
 
 
 @dataclass
@@ -48,6 +48,13 @@ def validate_structural(
     dep_graph: dict[int, list[int]] | None = None,
 ) -> ValidationResult:
     reasons: list[str] = []
+
+    if issue.status not in KNOWN_STATUSES:
+        reasons.append(
+            f"unknown status {issue.status!r} — create issues with `orchestra issue add`; "
+            "direct queue edits are for status/priority/dep overrides on existing issues, "
+            "not hand-writing new ones"
+        )
 
     if not issue.title.strip():
         reasons.append("missing title")

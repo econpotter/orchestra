@@ -8,6 +8,16 @@ _HEADER_RE = re.compile(r"^##\s+#(\d+)\s+([A-Za-z0-9._-]+):\s+(.+?)\s*$")
 _NULLS = {"", "null", "none"}
 _TRUE = {"true", "yes", "1", "on"}
 
+# Every Status value the state machine (selection.role_for_issue, reconcile, archive) ever
+# writes or reads. A value outside this set is not a state — most likely a hand-edited issue
+# block bypassing `orchestra issue add` — and must fail loud (validate.validate_structural)
+# rather than sit invisible forever (issue.status not in ROLE_FOR_STATUS just skips dispatch
+# silently).
+KNOWN_STATUSES = {
+    "open", "held", "validated", "needs_rework", "in_progress",
+    "committed", "awaiting_review", "blocked", "archived",
+}
+
 
 @dataclass
 class AcceptanceItem:
