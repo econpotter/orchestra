@@ -84,7 +84,7 @@ def _isolated_harness(root: Path, name: str):
         return None
     if harness.kind not in {"codex", "claude"} or harness.environment.policy != "isolated":
         print(
-            f"harness {name!r} setup/doctor requires isolated Codex or Claude",
+            f"harness {name!r} setup/doctor/login requires isolated Codex or Claude",
             file=sys.stderr,
         )
         return None
@@ -94,6 +94,12 @@ def _isolated_harness(root: Path, name: str):
         instruction_policy="explicit_bundle" if harness.kind == "claude" else "native_project",
     )
     return config, harness, envelope
+
+
+def _login_argv(kind: str) -> list[str]:
+    """The harness CLI's interactive login subcommand — one definition shared by
+    `harness setup` (which only prints it) and `harness login` (which runs it)."""
+    return ["login"] if kind == "codex" else ["auth", "login"]
 
 
 def cmd_harness_setup(args: argparse.Namespace) -> int:
@@ -126,12 +132,55 @@ def cmd_harness_setup(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"could not prepare isolated {harness.kind} state directory: {exc}", file=sys.stderr)
         return 1
-    login_argv = "login" if harness.kind == "codex" else "auth login"
+    login_argv = " ".join(_login_argv(harness.kind))
     print(
         f"{variable}={shlex.quote(str(state_dir))} "
         f"{shlex.quote(harness.executable)} {login_argv}"
     )
     return 0
+
+
+def cmd_harness_login(args: argparse.Namespace) -> int:
+    resolved = _isolated_harness(Path(args.root), args.name)
+    if resolved is None:
+        return 2
+    config, harness, envelope = resolved
+    variable = "CODEX_HOME" if harness.kind == "codex" else "CLAUDE_CONFIG_DIR"
+    state_dir = Path(dict(envelope.environment)[variable])
+    if not state_dir.is_dir():
+        print(
+            f"harness {args.name!r} has no isolated home yet at {state_dir}; "
+            f"run `orchestra harness setup {args.name}` first",
+            file=sys.stderr,
+        )
+        return 2
+
+    active = harness_workers_active(
+        load_registry(Path(args.root) / ".orchestra" / "workers.json"), config, args.name,
+    )
+    if active:
+        warning = (
+            f"harness {args.name!r} has active workers; logging in rotates the shared "
+            "credential and revokes the token they are holding, which 401s them mid-run"
+        )
+        if not args.force:
+            print(f"{warning} — pass --force to proceed anyway", file=sys.stderr)
+            return 2
+        print(f"{warning} — proceeding because --force was given", file=sys.stderr)
+
+    argv = [harness.executable, *_login_argv(harness.kind)]
+    environment = auth.shared_home_environment(harness.kind, state_dir)
+    try:
+        # A file lock around a login the operator drives interactively: it serializes this
+        # rewrite of the shared credential against the dispatch refresher and `harness
+        # doctor` (both of which take the same lock), without touching the child's stdio —
+        # the lock lives in the parent process, the login subprocess still has the terminal.
+        with auth.credential_lock(state_dir):
+            result = subprocess.run(argv, env=environment)
+    except OSError as exc:
+        print(f"could not run {shlex.join(argv)}: {exc}", file=sys.stderr)
+        return 1
+    return result.returncode
 
 
 def cmd_harness_doctor(args: argparse.Namespace) -> int:
@@ -916,6 +965,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the Claude revocation probe (no network access)",
     )
     p_harness_doctor.set_defaults(func=cmd_harness_doctor)
+    p_harness_login = harness_sub.add_parser(
+        "login", help="run the isolated-home login flow interactively"
+    )
+    p_harness_login.add_argument("name")
+    p_harness_login.add_argument(
+        "--force", action="store_true",
+        help="log in even while workers of this harness are active "
+             "(rotates the shared credential and 401s their in-flight token)",
+    )
+    p_harness_login.set_defaults(func=cmd_harness_login)
 
     p_engine = sub.add_parser("engine", help="diagnose the installed Orchestra engine")
     engine_sub = p_engine.add_subparsers(dest="engine_command", required=True)

@@ -661,3 +661,161 @@ def test_harness_doctor_probe_never_prints_the_access_token_value(
     assert "very-secret-access-token-value" not in out.out
     assert "very-secret-access-token-value" not in out.err
     assert json.loads(out.out)["probe"] == "revoked"
+
+
+# --- harness login -----------------------------------------------------------------
+
+
+def test_harness_login_composes_the_claude_login_invocation_under_the_lock(
+    tmp_path, monkeypatch, capsys,
+):
+    import fcntl
+    import subprocess as subprocess_module
+
+    from orchestra import auth
+
+    state_dir = _doctor_setup(tmp_path, monkeypatch, expires_in=40000)
+    observed = {}
+
+    def fake_run(argv, **kwargs):
+        contender = open(auth._lock_path(state_dir), "w")
+        try:
+            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            observed["locked"] = False
+        except BlockingIOError:
+            observed["locked"] = True
+        finally:
+            contender.close()
+        observed["argv"] = argv
+        observed["env"] = kwargs["env"]
+        return subprocess_module.CompletedProcess(argv, 0)
+
+    import orchestra.cli as cli
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert main(["--root", str(tmp_path), "harness", "login", "automation"]) == 0
+    assert observed["argv"] == ["claude", "auth", "login"]
+    assert observed["env"]["CLAUDE_CONFIG_DIR"] == str(state_dir)
+    assert observed["locked"] is True
+    assert capsys.readouterr().err == ""
+
+
+def test_harness_login_composes_the_codex_login_invocation(tmp_path, monkeypatch, capsys):
+    import subprocess as subprocess_module
+
+    import orchestra.cli as cli
+
+    _write_harness_config(tmp_path, kind="codex")
+    state_dir = tmp_path / ".orchestra" / "homes" / "codex"
+    state_dir.mkdir(parents=True)
+    observed = {}
+
+    def fake_run(argv, **kwargs):
+        observed["argv"] = argv
+        observed["env"] = kwargs["env"]
+        return subprocess_module.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert main(["--root", str(tmp_path), "harness", "login", "automation"]) == 0
+    assert observed["argv"] == ["codex", "login"]
+    assert observed["env"]["CODEX_HOME"] == str(state_dir)
+
+
+def test_harness_login_returns_the_login_process_exit_code(tmp_path, monkeypatch, capsys):
+    import subprocess as subprocess_module
+
+    import orchestra.cli as cli
+
+    state_dir = _doctor_setup(tmp_path, monkeypatch, expires_in=40000)
+    monkeypatch.setattr(
+        cli.subprocess, "run",
+        lambda argv, **kwargs: subprocess_module.CompletedProcess(argv, 17),
+    )
+    assert state_dir.is_dir()  # sanity: the guard rail below is not what's under test
+
+    assert main(["--root", str(tmp_path), "harness", "login", "automation"]) == 17
+
+
+def test_harness_login_refuses_when_the_home_is_missing(tmp_path, capsys):
+    _write_harness_config(tmp_path, kind="claude")
+
+    assert main(["--root", str(tmp_path), "harness", "login", "automation"]) == 2
+    err = capsys.readouterr().err
+    assert "orchestra harness setup automation" in err
+
+
+def test_harness_login_refuses_unknown_harness_name(tmp_path, capsys):
+    _write_harness_config(tmp_path, kind="claude")
+
+    assert main(["--root", str(tmp_path), "harness", "login", "nope"]) == 2
+    assert "harness 'nope' is not configured" in capsys.readouterr().err
+
+
+def test_harness_login_refuses_ambient_harness(tmp_path, capsys):
+    _write_harness_config(tmp_path, kind="claude", policy="ambient")
+
+    assert main(["--root", str(tmp_path), "harness", "login", "automation"]) == 2
+    assert "isolated Codex or Claude" in capsys.readouterr().err
+
+
+def test_harness_login_refuses_while_workers_are_active_without_force(
+    tmp_path, monkeypatch, capsys,
+):
+    import orchestra.cli as cli
+
+    _doctor_setup(tmp_path, monkeypatch, expires_in=40000)
+    _live_worker_registry(tmp_path)
+
+    def _refuse(argv, **kwargs):
+        raise AssertionError("login must not run while workers are active without --force")
+
+    monkeypatch.setattr(cli.subprocess, "run", _refuse)
+
+    assert main(["--root", str(tmp_path), "harness", "login", "automation"]) == 2
+    err = capsys.readouterr().err
+    assert "active workers" in err
+    assert "--force" in err
+
+
+def test_harness_login_proceeds_with_force_while_workers_are_active(
+    tmp_path, monkeypatch, capsys,
+):
+    import subprocess as subprocess_module
+
+    import orchestra.cli as cli
+
+    state_dir = _doctor_setup(tmp_path, monkeypatch, expires_in=40000)
+    _live_worker_registry(tmp_path)
+    observed = {}
+
+    def fake_run(argv, **kwargs):
+        observed["argv"] = argv
+        return subprocess_module.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert main([
+        "--root", str(tmp_path), "harness", "login", "automation", "--force",
+    ]) == 0
+    assert observed["argv"] == ["claude", "auth", "login"]
+    err = capsys.readouterr().err
+    assert "active workers" in err
+    assert "--force was given" in err
+    assert state_dir.is_dir()
+
+
+def test_harness_login_reports_a_missing_executable_without_a_traceback(
+    tmp_path, monkeypatch, capsys,
+):
+    import orchestra.cli as cli
+
+    _doctor_setup(tmp_path, monkeypatch, expires_in=40000)
+
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert main(["--root", str(tmp_path), "harness", "login", "automation"]) == 1
+    assert "claude" in capsys.readouterr().err
