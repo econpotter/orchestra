@@ -675,6 +675,34 @@ def test_gate_leaves_a_credential_with_life_left_alone(tmp_path: Path, invocatio
     assert not (tmp_path / ".orchestra" / "auth-refresh.json").exists()
 
 
+def test_gate_clears_a_stale_failed_alert_once_the_credential_is_healthy_again(
+    tmp_path: Path, invocations,
+):
+    """A prior tick recorded FAILED (e.g. before an operator ran `orchestra harness login`
+    or the token simply outlived the refresh margin). The credential is healthy now, so this
+    tick never attempts a refresh — it must still clear the stale alert, or `orchestra
+    status` keeps reporting a resolved problem forever (nothing else writes this record when
+    the token is not stale)."""
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=40000)
+    from orchestra.dispatch import _record_auth_refresh
+    _record_auth_refresh(
+        tmp_path, "claude",
+        auth.RefreshOutcome(auth.FAILED, "access token is expired"),
+        at="2026-08-02T22:42:24+00:00",
+    )
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started="2026-08-02T22:45:56+00:00"
+    )
+
+    assert held == set()
+    assert invocations == []  # healthy token: no refresh attempt runs
+    record = _record(tmp_path)["claude"]
+    assert record["outcome"] == auth.NOT_NEEDED
+    assert record["at"] == "2026-08-02T22:45:56+00:00"
+
+
 def test_gate_skips_harnesses_without_a_managed_claude_home(tmp_path: Path, invocations):
     config = _gate_config(tmp_path, extra="")
     _write_credential(tmp_path / ".orchestra" / "homes" / "codex", expires_in=600)

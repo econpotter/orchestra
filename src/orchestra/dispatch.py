@@ -243,6 +243,29 @@ def _record_auth_refresh(
     os.replace(tmp, path)
 
 
+def _clear_stale_auth_alert(root: Path, harness_name: str, *, at: str) -> None:
+    """Clear a previously recorded FAILED/HELD auth-refresh alert once the credential is
+    healthy again (outliving the refresh margin, or a manual `orchestra harness login`) —
+    the only other writer of this record is a refresh *attempt*, which does not run once the
+    token is not stale, so without this the last bad record sits in `orchestra status`
+    forever even after the problem is resolved."""
+    path = root / ".orchestra" / _AUTH_REFRESH_RECORD
+    if not path.exists():
+        return
+    try:
+        records = json.loads(path.read_text())
+    except ValueError:
+        return
+    if not isinstance(records, dict):
+        return
+    record = records.get(harness_name)
+    if isinstance(record, dict) and record.get("outcome") in {auth.FAILED, auth.HELD}:
+        _record_auth_refresh(
+            root, harness_name,
+            auth.RefreshOutcome(auth.NOT_NEEDED, "credential healthy again"), at=at,
+        )
+
+
 def _refresh_managed_credentials(
     root: Path, config: Config, reg: dict[str, WorkerHandle], harness_names: set[str],
     *, started: str,
@@ -286,6 +309,7 @@ def _refresh_managed_credentials(
         try:
             home = managed_auth_home(root, name, harness.environment.state_dir)
             if not auth.is_stale(home, config.refresh_margin_seconds):
+                _clear_stale_auth_alert(root, name, at=started)
                 continue
             if harness_workers_active(reg, config, name):
                 held.add(name)
