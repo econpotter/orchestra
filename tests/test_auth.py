@@ -739,6 +739,35 @@ def test_gate_stamps_a_genuine_state_change(tmp_path: Path, refreshing_runner):
     assert refreshed["at"] == "2026-07-30T00:05:00+00:00"
 
 
+def test_gate_holds_when_a_failed_refresh_cleared_the_token(tmp_path: Path, monkeypatch):
+    """A failed refresh zeroes the stored tokens but leaves `expiresAt` alone (spike s1), so
+    the credential reads as unexpired while being unusable. Proceeding "degraded" on it
+    fails every worker's authentication preflight, and `authentication_failure` is a
+    blocking outcome — the whole queue would block. Hold instead, as for an expired token."""
+    config = _gate_config(tmp_path)
+    home = _shared_home(tmp_path)
+    _write_credential(home, expires_in=600)
+
+    def fake(command, environment):
+        path = auth.credential_path(home)  # the CLI persists the FAILED refresh in place
+        data = json.loads(path.read_text())
+        data["claudeAiOauth"]["accessToken"] = ""
+        data["claudeAiOauth"]["refreshToken"] = ""
+        path.write_text(json.dumps(data))
+        return 0
+
+    monkeypatch.setattr(auth, "run_auth_status_command", fake)
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    assert auth.is_stale(home, 0) is False  # expiry alone still says "fine"
+    assert held == {"claude"}
+    assert _record(tmp_path)["claude"]["outcome"] == auth.FAILED
+    assert "no usable access token" in _record(tmp_path)["claude"]["detail"]
+
+
 def test_gate_leaves_a_credential_with_life_left_alone(tmp_path: Path, invocations):
     config = _gate_config(tmp_path)
     _write_credential(_shared_home(tmp_path), expires_in=40000)
