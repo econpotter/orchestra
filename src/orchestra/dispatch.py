@@ -319,6 +319,12 @@ def _refresh_managed_credentials(
         harness = config.harnesses[name]
         if harness.kind != "claude" or harness.environment.policy != "isolated":
             continue  # only a managed Claude home has a credential the engine owns
+        if auth.oauth_token(root) is not None:
+            # Launches carry a long-lived setup-token that overrides the seeded credential,
+            # so the credential's own expiry no longer gates anything. Clear any alert the
+            # credential-refresh path left behind rather than holding dispatch on it.
+            _clear_stale_auth_alert(root, name, at=started)
+            continue
         try:
             home = managed_auth_home(root, name, harness.environment.state_dir)
             if not auth.is_stale(home, config.refresh_margin_seconds):

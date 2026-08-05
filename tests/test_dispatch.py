@@ -528,6 +528,65 @@ def test_dispatch_holds_launches_of_a_harness_awaiting_credential_refresh(
     assert load_registry(tmp_path / ".orchestra" / "workers.json") == {}
 
 
+CLAUDE_CONFIG = """\
+slots: 5
+roles:
+  validator: { harness: claude, model: m, prompt: prompts/validator.md }
+  worker:    { harness: claude, model: m, prompt: prompts/worker.md }
+  verifier:  { harness: claude, model: m, prompt: prompts/verify-review.md }
+harnesses:
+  claude:
+    kind: claude
+    executable: claude
+    preflight: false
+    environment:
+      policy: isolated
+      state_dir: .orchestra/homes/claude
+      verified_capabilities:
+        - isolates_user_config
+        - isolates_user_instructions
+        - isolates_user_skills
+        - isolates_user_integrations
+        - isolates_session_state
+        - supports_dedicated_auth_home
+sandbox:
+  enabled: true
+  kind: systemd
+"""
+
+
+def test_a_setup_token_bypasses_the_credential_refresh_gate(tmp_path, monkeypatch):
+    """A long-lived setup-token authenticates every launch, so the credential file's own
+    expiry gates nothing: dispatch must not be held, and no rotation may be attempted."""
+    import orchestra.dispatch as d
+
+    (tmp_path / "prompts").mkdir()
+    for name in ("validator.md", "worker.md", "verify-review.md"):
+        (tmp_path / "prompts" / name).write_text("x")
+    (tmp_path / "config.yaml").write_text(CLAUDE_CONFIG)
+    (tmp_path / ".orchestra").mkdir()
+    # An expired credential beside the token: without the bypass this is exactly the state
+    # that sends the gate into a rotation, so the test cannot pass vacuously.
+    home = tmp_path / ".orchestra" / "homes" / "claude"
+    home.mkdir(parents=True)
+    (home / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": "expired", "refreshToken": "r",
+        "expiresAt": int((time.time() - 3600) * 1000),
+        "refreshTokenExpiresAt": int((time.time() + 30 * 86400) * 1000),
+    }}))
+    (tmp_path / ".claude.token").write_text("sk-ant-oat01-EXAMPLE\n")
+    cfg = load_config(tmp_path / "config.yaml")
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("a rotation was attempted while a setup-token was in use")
+
+    monkeypatch.setattr(d.auth, "refresh_shared_credential", must_not_run)
+
+    held = d._refresh_managed_credentials(tmp_path, cfg, {}, {"claude"}, started="t")
+
+    assert held == set()
+
+
 def test_dispatch_refreshes_credentials_before_any_launch(tmp_path, monkeypatch):
     """The refresh gate runs before the first launch, so no seed carries a stale token."""
     import orchestra.dispatch as d

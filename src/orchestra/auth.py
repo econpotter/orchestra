@@ -21,6 +21,15 @@ from typing import Any
 # populating a managed home by hand — see docs/notes/2026-07-30-refresh-trigger-spike.md).
 CREDENTIAL_FILE = ".credentials.json"
 
+# A long-lived `claude setup-token` credential, kept at the workspace root. When present it
+# is passed to every Claude launch as `CLAUDE_CODE_OAUTH_TOKEN`, which overrides the
+# credential file outright: verified against CLI 2.1.221, `authMethod` reports `oauth_token`
+# whether the home holds an expired `.credentials.json` or none at all. It carries no
+# 8-hour access token, so nothing has to refresh it and the refresh machinery below is
+# bypassed for as long as the file exists.
+OAUTH_TOKEN_FILE = ".claude.token"
+OAUTH_TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
+
 AUTH_STATUS_TIMEOUT = 15
 
 # `harness doctor`'s expiry readout warns once the refresh-token horizon (the ~30-day point
@@ -73,6 +82,21 @@ def auth_status_command(kind: str, executable: str) -> list[str] | None:
 
 def credential_path(home: Path) -> Path:
     return home / CREDENTIAL_FILE
+
+
+def oauth_token(root: Path) -> str | None:
+    """The long-lived OAuth token at `<root>/.claude.token`, or None when absent or empty.
+
+    A missing file is the ordinary case (credential-file auth), not an error. An unreadable
+    or empty one is None as well, so a half-written file falls back to the credential path
+    rather than exporting a broken token to every worker. The value is a secret: it is only
+    ever placed in a launch's environment, never logged or persisted.
+    """
+    try:
+        token = (root / OAUTH_TOKEN_FILE).read_text().strip()
+    except OSError:
+        return None
+    return token or None
 
 
 def _lock_path(home: Path) -> Path:

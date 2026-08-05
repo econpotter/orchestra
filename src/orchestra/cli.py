@@ -202,8 +202,18 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
     except (OSError, RuntimeError, subprocess.SubprocessError):
         pass
 
+    # Which credential launches actually authenticate with. A long-lived setup-token
+    # overrides the seeded credential file outright, so when one is in use the credential's
+    # login check, expiry and revocation state describe something nothing reads — reporting
+    # them as readiness is how a broken credential looked healthy for a week.
+    uses_setup_token = (
+        harness.kind == "claude" and auth.oauth_token(Path(args.root)) is not None
+    )
+
     login = "not_checked"
-    if state_dir_exists and state_dir_writable and executable and preflight == "passed":
+    if uses_setup_token:
+        login = "not_checked_setup_token"
+    elif state_dir_exists and state_dir_writable and executable and preflight == "passed":
         environment = os.environ.copy()
         environment.update(dict(envelope.environment))
         # Doctor's login check runs against the SHARED home, and for Claude the check
@@ -245,8 +255,16 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
     if harness.kind == "claude":
         access_at, access_days = auth.describe_expiry(auth.access_expiry(state_dir))
         refresh_at, refresh_days = auth.describe_expiry(auth.refresh_expiry(state_dir))
-        refresh_warning = refresh_days is not None and refresh_days < auth.REFRESH_WARNING_DAYS
-        if args.no_probe:
+        # The horizon warning tells the operator to re-run `harness login`; that is only
+        # worth saying when the credential is what authenticates a launch.
+        refresh_warning = (
+            not uses_setup_token
+            and refresh_days is not None
+            and refresh_days < auth.REFRESH_WARNING_DAYS
+        )
+        if uses_setup_token:
+            probe = "skipped_setup_token"
+        elif args.no_probe:
             probe = "disabled"
         elif login in ("authenticated", "not_authenticated"):
             probe = auth.probe_shared_credential(state_dir)
@@ -285,9 +303,17 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
             except OSError:
                 instructions = "source_unavailable"
 
+    # Readiness covers only what actually gates a launch. Under a setup-token the credential
+    # file authenticates nothing, so its login check and revocation state are dropped from
+    # the verdict rather than reported as failures — an expired credential beside a working
+    # token is not a broken harness. What remains unchecked either way: neither branch proves
+    # the credential in use still works, only a real dispatch does.
+    credential_checks = (
+        () if uses_setup_token else (login == "authenticated", probe != auth.REVOKED)
+    )
     ready = all((state_dir_exists, state_dir_writable, executable, preflight == "passed",
-                 state_dir_private, login == "authenticated",
-                 instructions in {"not_configured", "current"}, probe != auth.REVOKED))
+                 state_dir_private, instructions in {"not_configured", "current"},
+                 *credential_checks))
     report = {
         "name": args.name,
         "kind": harness.kind,
@@ -296,6 +322,13 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
         "state_dir_exists": state_dir_exists,
         "state_dir_writable": state_dir_writable,
         "state_dir_private": state_dir_private,
+        # Which credential launches actually use. `setup_token` means the expiry readout and
+        # the probe below describe a credential file nothing reads any more.
+        "auth_source": (
+            "setup_token"
+            if harness.kind == "claude" and auth.oauth_token(Path(args.root)) is not None
+            else "credential_file"
+        ),
         "executable": executable,
         "version": version,
         "preflight": preflight,
