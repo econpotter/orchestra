@@ -322,6 +322,16 @@ def refresh_shared_credential(
     what is checked. The refreshed credential is written by the harness itself; orchestra
     never rewrites the shared credential file.
 
+    An unmoved expiry is not automatically a failure, though. The CLI refreshes only when
+    the token is past expiry or inside its own internal buffer (spike section 1: "past or
+    within buffer, refreshing immediately"), and that buffer is far narrower than
+    `margin_seconds` — so across most of our margin the CLI exits 0, declines to refresh a
+    token it still considers good, and leaves the credential untouched. That is "not yet",
+    not a failure, and scoring it `FAILED` made the dispatch gate alternate between `FAILED`
+    and `HELD` on every tick as workers started and drained. The two cases are told apart by
+    what the CLI did to the credential: a real failed refresh zeroes the stored tokens,
+    whereas declining leaves the file byte-for-byte intact.
+
     `blocking=False` (the dispatch tick's use) never waits for a concurrent writer: an
     operator-driven `harness doctor`/`harness login` can hold this lock for as long as its
     terminal session takes, and a dispatch tick must not stall the whole engine behind that.
@@ -345,5 +355,13 @@ def refresh_shared_credential(
             return RefreshOutcome(FAILED, f"{' '.join(command[1:])} exited {code}")
         after = access_expiry(home)
         if after is None or after <= before:
+            if after == before and access_token(home) is not None and not _stale(
+                before, 0, None
+            ):
+                return RefreshOutcome(
+                    NOT_NEEDED,
+                    "harness declined to refresh; the token is still valid and outside "
+                    "its own refresh buffer",
+                )
             return RefreshOutcome(FAILED, "access token expiry did not move forward")
         return RefreshOutcome(REFRESHED)

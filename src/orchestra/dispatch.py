@@ -226,7 +226,13 @@ _AUTH_REFRESH_RECORD = "auth-refresh.json"
 def _record_auth_refresh(
     root: Path, harness_name: str, outcome: auth.RefreshOutcome, *, at: str
 ) -> None:
-    """Persist the last refresh event per harness so `orchestra status` can surface it."""
+    """Persist the last refresh event per harness so `orchestra status` can surface it.
+
+    An unchanged outcome is not rewritten. This runs on every dispatch tick, so re-stamping
+    an identical outcome with a fresh `at` makes anything watching this record — `orchestra
+    status` pollers, notifiers — see a state change on each poll. `at` therefore marks when
+    the harness ENTERED this state, not when it was last observed in it.
+    """
     path = root / ".orchestra" / _AUTH_REFRESH_RECORD
     records: dict[str, dict[str, str]] = {}
     if path.exists():
@@ -236,6 +242,13 @@ def _record_auth_refresh(
             loaded = None
         if isinstance(loaded, dict):
             records = loaded
+    previous = records.get(harness_name)
+    if (
+        isinstance(previous, dict)
+        and previous.get("outcome") == outcome.action
+        and previous.get("detail") == outcome.detail
+    ):
+        return
     records[harness_name] = {"outcome": outcome.action, "detail": outcome.detail, "at": at}
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
