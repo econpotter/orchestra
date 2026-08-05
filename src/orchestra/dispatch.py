@@ -226,7 +226,13 @@ _AUTH_REFRESH_RECORD = "auth-refresh.json"
 def _record_auth_refresh(
     root: Path, harness_name: str, outcome: auth.RefreshOutcome, *, at: str
 ) -> None:
-    """Persist the last refresh event per harness so `orchestra status` can surface it."""
+    """Persist the last refresh event per harness so `orchestra status` can surface it.
+
+    An unchanged outcome is not rewritten. This runs on every dispatch tick, so re-stamping
+    an identical outcome with a fresh `at` makes anything watching this record — `orchestra
+    status` pollers, notifiers — see a state change on each poll. `at` therefore marks when
+    the harness ENTERED this state, not when it was last observed in it.
+    """
     path = root / ".orchestra" / _AUTH_REFRESH_RECORD
     records: dict[str, dict[str, str]] = {}
     if path.exists():
@@ -236,6 +242,13 @@ def _record_auth_refresh(
             loaded = None
         if isinstance(loaded, dict):
             records = loaded
+    previous = records.get(harness_name)
+    if (
+        isinstance(previous, dict)
+        and previous.get("outcome") == outcome.action
+        and previous.get("detail") == outcome.detail
+    ):
+        return
     records[harness_name] = {"outcome": outcome.action, "detail": outcome.detail, "at": at}
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -306,6 +319,12 @@ def _refresh_managed_credentials(
         harness = config.harnesses[name]
         if harness.kind != "claude" or harness.environment.policy != "isolated":
             continue  # only a managed Claude home has a credential the engine owns
+        if auth.oauth_token(root) is not None:
+            # Launches carry a long-lived setup-token that overrides the seeded credential,
+            # so the credential's own expiry no longer gates anything. Clear any alert the
+            # credential-refresh path left behind rather than holding dispatch on it.
+            _clear_stale_auth_alert(root, name, at=started)
+            continue
         try:
             home = managed_auth_home(root, name, harness.environment.state_dir)
             if not auth.is_stale(home, config.refresh_margin_seconds):
@@ -339,19 +358,29 @@ def _refresh_managed_credentials(
                 _record_auth_refresh(root, name, outcome, at=started)
                 continue
             if outcome.action == auth.FAILED:
-                # `margin_seconds=0` asks the narrower question "is the token dead *now*",
-                # not "is it inside the dispatch margin".
+                # Whether dispatch can limp on depends on the token being USABLE, which is
+                # narrower than "its expiry is in the future": a failed refresh zeroes the
+                # stored tokens in place and leaves `expiresAt` untouched (spike section 1),
+                # so an expiry check alone reads a dead credential as healthy. `margin_
+                # seconds=0` asks the expiry half — "is the token dead *now*", not "is it
+                # inside the dispatch margin".
                 if auth.is_stale(home, 0):
+                    dead = "the access token is expired"
+                elif auth.access_token(home) is None:
+                    dead = "no usable access token remains"
+                else:
+                    dead = ""
+                if dead:
                     held.add(name)
                     outcome = auth.RefreshOutcome(
                         auth.FAILED,
-                        f"{outcome.detail}; access token is expired — holding {name} "
+                        f"{outcome.detail}; {dead} — holding {name} "
                         f"dispatches until a refresh succeeds or the home is re-authenticated "
                         f"(orchestra harness login {name})",
                     )
                     print(
-                        f"dispatch: WARNING shared {name} credential refresh failed and the "
-                        f"access token is expired ({outcome.detail}); holding {name} "
+                        f"dispatch: WARNING shared {name} credential refresh failed and "
+                        f"{dead} ({outcome.detail}); holding {name} "
                         "dispatches rather than blocking every issue on preflight",
                         file=sys.stderr,
                     )

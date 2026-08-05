@@ -21,6 +21,15 @@ from typing import Any
 # populating a managed home by hand — see docs/notes/2026-07-30-refresh-trigger-spike.md).
 CREDENTIAL_FILE = ".credentials.json"
 
+# A long-lived `claude setup-token` credential, kept at the workspace root. When present it
+# is passed to every Claude launch as `CLAUDE_CODE_OAUTH_TOKEN`, which overrides the
+# credential file outright: verified against CLI 2.1.221, `authMethod` reports `oauth_token`
+# whether the home holds an expired `.credentials.json` or none at all. It carries no
+# 8-hour access token, so nothing has to refresh it and the refresh machinery below is
+# bypassed for as long as the file exists.
+OAUTH_TOKEN_FILE = ".claude.token"
+OAUTH_TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
+
 AUTH_STATUS_TIMEOUT = 15
 
 # `harness doctor`'s expiry readout warns once the refresh-token horizon (the ~30-day point
@@ -73,6 +82,21 @@ def auth_status_command(kind: str, executable: str) -> list[str] | None:
 
 def credential_path(home: Path) -> Path:
     return home / CREDENTIAL_FILE
+
+
+def oauth_token(root: Path) -> str | None:
+    """The long-lived OAuth token at `<root>/.claude.token`, or None when absent or empty.
+
+    A missing file is the ordinary case (credential-file auth), not an error. An unreadable
+    or empty one is None as well, so a half-written file falls back to the credential path
+    rather than exporting a broken token to every worker. The value is a secret: it is only
+    ever placed in a launch's environment, never logged or persisted.
+    """
+    try:
+        token = (root / OAUTH_TOKEN_FILE).read_text().strip()
+    except OSError:
+        return None
+    return token or None
 
 
 def _lock_path(home: Path) -> Path:
@@ -322,6 +346,16 @@ def refresh_shared_credential(
     what is checked. The refreshed credential is written by the harness itself; orchestra
     never rewrites the shared credential file.
 
+    An unmoved expiry is not automatically a failure, though. The CLI refreshes only when
+    the token is past expiry or inside its own internal buffer (spike section 1: "past or
+    within buffer, refreshing immediately"), and that buffer is far narrower than
+    `margin_seconds` — so across most of our margin the CLI exits 0, declines to refresh a
+    token it still considers good, and leaves the credential untouched. That is "not yet",
+    not a failure, and scoring it `FAILED` made the dispatch gate alternate between `FAILED`
+    and `HELD` on every tick as workers started and drained. The two cases are told apart by
+    what the CLI did to the credential: a real failed refresh zeroes the stored tokens,
+    whereas declining leaves the file byte-for-byte intact.
+
     `blocking=False` (the dispatch tick's use) never waits for a concurrent writer: an
     operator-driven `harness doctor`/`harness login` can hold this lock for as long as its
     terminal session takes, and a dispatch tick must not stall the whole engine behind that.
@@ -345,5 +379,13 @@ def refresh_shared_credential(
             return RefreshOutcome(FAILED, f"{' '.join(command[1:])} exited {code}")
         after = access_expiry(home)
         if after is None or after <= before:
+            if after == before and access_token(home) is not None and not _stale(
+                before, 0, None
+            ):
+                return RefreshOutcome(
+                    NOT_NEEDED,
+                    "harness declined to refresh; the token is still valid and outside "
+                    "its own refresh buffer",
+                )
             return RefreshOutcome(FAILED, "access token expiry did not move forward")
         return RefreshOutcome(REFRESHED)

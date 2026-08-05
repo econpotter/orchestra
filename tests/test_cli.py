@@ -193,6 +193,7 @@ def test_harness_doctor_json_checks_preflight_and_isolated_login(
         "state_dir_exists": True,
         "state_dir_writable": True,
         "state_dir_private": True,
+        "auth_source": "credential_file",
         "executable": "/usr/bin/codex",
         "version": "codex-cli 9.9",
         "preflight": "passed",

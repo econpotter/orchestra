@@ -359,6 +359,42 @@ def test_refresh_fails_when_the_credential_expiry_does_not_move(tmp_path: Path, 
     assert "did not move forward" in outcome.detail
 
 
+def test_refresh_is_not_needed_when_the_harness_declines_a_still_valid_token(
+    tmp_path: Path, monkeypatch,
+):
+    """The CLI refreshes only past expiry or inside its own internal buffer (spike s1),
+    which is far narrower than `margin_seconds`. Inside that gap it exits 0 and leaves the
+    credential untouched — "not yet", not a failure. Scoring it FAILED made the dispatch
+    gate alternate between FAILED and HELD every tick as workers started and drained."""
+    home = tmp_path / "homes" / "claude"
+    _write_credential(home, expires_in=14000)  # stale by an 18000s margin, still valid
+    before = auth.credential_path(home).read_text()
+
+    monkeypatch.setattr(auth, "run_auth_status_command", lambda command, environment: 0)
+
+    outcome = auth.refresh_shared_credential("claude", "claude", home, margin_seconds=18000)
+
+    assert outcome.action == auth.NOT_NEEDED
+    assert "outside" in outcome.detail
+    assert auth.credential_path(home).read_text() == before  # untouched, not rotated
+
+
+def test_refresh_still_fails_when_an_expired_token_does_not_move(
+    tmp_path: Path, monkeypatch,
+):
+    """The narrow "declined" reading must not swallow a real failure: once the token is
+    genuinely dead, an unmoved expiry is a failed refresh, not the CLI declining."""
+    home = tmp_path / "homes" / "claude"
+    _write_credential(home, expires_in=-600)  # already expired
+
+    monkeypatch.setattr(auth, "run_auth_status_command", lambda command, environment: 0)
+
+    outcome = auth.refresh_shared_credential("claude", "claude", home, margin_seconds=18000)
+
+    assert outcome.action == auth.FAILED
+    assert "did not move forward" in outcome.detail
+
+
 def test_refresh_is_a_no_op_for_a_harness_without_an_auth_status_command(
     tmp_path: Path, invocations,
 ):
@@ -660,6 +696,76 @@ def test_gate_ignores_registry_rows_whose_supervisor_is_gone(
 
     assert held == set()
     assert len(refreshing_runner) == 1
+
+
+def test_gate_does_not_restamp_an_unchanged_outcome(tmp_path: Path, refreshing_runner):
+    """The gate runs every dispatch tick. Re-stamping an identical outcome with a fresh
+    `at` makes every watcher of this record see a state change on each poll, so the
+    timestamp must mark when the harness ENTERED the state, not when it was last seen."""
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=600)
+    registry = {"wf#1": _handle("worker", alive=True)}
+
+    _refresh_managed_credentials(
+        tmp_path, config, registry, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+    first = _record(tmp_path)["claude"]
+    _refresh_managed_credentials(
+        tmp_path, config, registry, {"claude"}, started="2026-07-30T00:05:00+00:00"
+    )
+    second = _record(tmp_path)["claude"]
+
+    assert first["outcome"] == auth.HELD
+    assert second == first  # same state, same timestamp — no re-notify
+
+
+def test_gate_stamps_a_genuine_state_change(tmp_path: Path, refreshing_runner):
+    """The converse of the above: a real transition must advance the timestamp."""
+    config = _gate_config(tmp_path)
+    _write_credential(_shared_home(tmp_path), expires_in=600)
+
+    _refresh_managed_credentials(
+        tmp_path, config, {"wf#1": _handle("worker", alive=True)}, {"claude"},
+        started="2026-07-30T00:00:00+00:00",
+    )
+    held = _record(tmp_path)["claude"]
+    _refresh_managed_credentials(  # workers drained: the refresh now runs
+        tmp_path, config, {}, {"claude"}, started="2026-07-30T00:05:00+00:00"
+    )
+    refreshed = _record(tmp_path)["claude"]
+
+    assert held["outcome"] == auth.HELD
+    assert refreshed["outcome"] == auth.REFRESHED
+    assert refreshed["at"] == "2026-07-30T00:05:00+00:00"
+
+
+def test_gate_holds_when_a_failed_refresh_cleared_the_token(tmp_path: Path, monkeypatch):
+    """A failed refresh zeroes the stored tokens but leaves `expiresAt` alone (spike s1), so
+    the credential reads as unexpired while being unusable. Proceeding "degraded" on it
+    fails every worker's authentication preflight, and `authentication_failure` is a
+    blocking outcome — the whole queue would block. Hold instead, as for an expired token."""
+    config = _gate_config(tmp_path)
+    home = _shared_home(tmp_path)
+    _write_credential(home, expires_in=600)
+
+    def fake(command, environment):
+        path = auth.credential_path(home)  # the CLI persists the FAILED refresh in place
+        data = json.loads(path.read_text())
+        data["claudeAiOauth"]["accessToken"] = ""
+        data["claudeAiOauth"]["refreshToken"] = ""
+        path.write_text(json.dumps(data))
+        return 0
+
+    monkeypatch.setattr(auth, "run_auth_status_command", fake)
+
+    held = _refresh_managed_credentials(
+        tmp_path, config, {}, {"claude"}, started="2026-07-30T00:00:00+00:00"
+    )
+
+    assert auth.is_stale(home, 0) is False  # expiry alone still says "fine"
+    assert held == {"claude"}
+    assert _record(tmp_path)["claude"]["outcome"] == auth.FAILED
+    assert "no usable access token" in _record(tmp_path)["claude"]["detail"]
 
 
 def test_gate_leaves_a_credential_with_life_left_alone(tmp_path: Path, invocations):

@@ -99,6 +99,27 @@ def test_isolated_claude_uses_dedicated_config_and_masks_personal_state(tmp_path
     ))
 
 
+def test_setup_token_is_exported_to_the_launch_when_the_workspace_has_one(tmp_path: Path):
+    """A long-lived setup-token overrides the seeded credential file, so every launch has to
+    carry it; without it the launch falls back to whatever the seeded credential holds."""
+    (tmp_path / ".claude.token").write_text("  sk-ant-oat01-EXAMPLE\n")
+    envelope = build_execution_envelope(
+        tmp_path, "claude", _isolated_claude(), {}, home=tmp_path / "home",
+        instruction_policy="explicit_bundle",
+    )
+    assert dict(envelope.environment)["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-EXAMPLE"
+
+
+def test_an_empty_token_file_falls_back_to_the_credential_file(tmp_path: Path):
+    """A half-written token file must not export a broken token to every worker."""
+    (tmp_path / ".claude.token").write_text("\n")
+    envelope = build_execution_envelope(
+        tmp_path, "claude", _isolated_claude(), {}, home=tmp_path / "home",
+        instruction_policy="explicit_bundle",
+    )
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in dict(envelope.environment)
+
+
 def _isolated_claude(state_dir: str = ".orchestra/homes/claude") -> HarnessConfig:
     return HarnessConfig(
         kind="claude", executable="claude",

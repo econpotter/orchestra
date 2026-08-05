@@ -7,6 +7,7 @@ from dataclasses import asdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchestra import auth
 from orchestra.config import HarnessConfig
 
 
@@ -236,8 +237,14 @@ def build_execution_envelope(
             name: name in harness.environment.verified_capabilities
             for name in ISOLATION_CAPABILITIES
         })
+        # A long-lived setup-token, when the workspace has one, overrides the seeded
+        # credential file for this launch (see `auth.OAUTH_TOKEN_FILE`).
+        environment = [("CLAUDE_CONFIG_DIR", str(state_dir))]
+        token = auth.oauth_token(root)
+        if token is not None:
+            environment.append((auth.OAUTH_TOKEN_VARIABLE, token))
         return ExecutionEnvelope(
-            environment=(("CLAUDE_CONFIG_DIR", str(state_dir)),),
+            environment=tuple(environment),
             read_write_paths=(str(state_dir),),
             inaccessible_paths=(f"-{home / '.claude'}",),
             effective_capabilities=capabilities,
