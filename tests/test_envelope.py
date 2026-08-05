@@ -216,8 +216,10 @@ def test_session_key_traversal_fails_with_a_clear_error(tmp_path: Path):
 
 
 def test_unauthenticated_source_seeds_unauthenticated_launch_home(tmp_path: Path):
-    # A genuinely unauthenticated harness (no credentials in the source) seeds an empty home,
-    # so preflight_authentication still fails loud at dispatch (#010 criterion 3).
+    # A genuinely unauthenticated harness (no credentials in the source) seeds an empty home.
+    # The launch itself then fails and the reconciler classifies it; the Claude authentication
+    # preflight no longer catches this, because it never could — it passed on a fabricated
+    # token (see test_claude_authentication_preflight_spawns_nothing).
     session = session_state_home(tmp_path, "claude", "attempt-x")
     seed_session_home(tmp_path / ".orchestra" / "homes" / "claude", session)
     assert session.is_dir()

@@ -63,17 +63,53 @@ def test_codex_authentication_preflight_fails_loud_without_credentials(monkeypat
         preflight_authentication("codex", "codex", {})
 
 
-def test_claude_authentication_preflight_uses_isolated_environment(monkeypatch):
+def test_claude_authentication_preflight_spawns_nothing(monkeypatch):
+    """`claude auth status --json` reports `loggedIn: true` for a fabricated token and for an
+    expired credential, so running it proved nothing about whether the launch can
+    authenticate. It is skipped rather than spawning a 276 MB binary per launch."""
     calls = []
 
     def run(argv, **kwargs):
-        calls.append((argv, kwargs))
+        calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, '{"loggedIn":true}', "")
 
     monkeypatch.setattr("orchestra.harness.subprocess.run", run)
     preflight_authentication("claude", "claude", {"CLAUDE_CONFIG_DIR": "/isolated"})
-    assert calls[0][0] == ["claude", "auth", "status", "--json"]
-    assert calls[0][1]["env"] == {"CLAUDE_CONFIG_DIR": "/isolated"}
+    assert calls == []
+
+
+def test_preflight_is_cached_per_binary_identity(monkeypatch, tmp_path: Path):
+    """Preflight interrogates the binary, so a second launch in the same tick must reuse the
+    answer instead of respawning it — that repetition is what a dispatch burst pays for."""
+    from orchestra import harness as harness_module
+
+    executable = tmp_path / "claude"
+    executable.write_text("")
+    executable.chmod(0o755)
+    flags = " ".join(("--output-format", "--json-schema", "--setting-sources", "--resume",
+                      "--permission-mode", "--safe-mode", "--disallowedTools",
+                      "--disable-slash-commands"))
+    spawns = []
+
+    def run(argv, **_kwargs):
+        spawns.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 0, "2.1.221" if argv[-1] == "--version" else flags, "",
+        )
+
+    monkeypatch.setattr("orchestra.harness.subprocess.run", run)
+    monkeypatch.setattr(harness_module, "_PREFLIGHT_CACHE", {})
+
+    assert preflight_harness("claude", str(executable)) == "2.1.221"
+    first = len(spawns)
+    assert preflight_harness("claude", str(executable)) == "2.1.221"
+
+    assert len(spawns) == first  # second call spawned nothing
+
+    # A reinstall in place must invalidate it, so a changed binary is re-checked.
+    executable.write_text("different")
+    assert preflight_harness("claude", str(executable)) == "2.1.221"
+    assert len(spawns) > first
 
 
 def _events(name: str) -> list[dict]:

@@ -370,11 +370,25 @@ def adapter_for(name: str) -> HarnessAdapter:
     raise ValueError(f"unsupported harness: {name}")
 
 
+# Preflight answers a question about the BINARY — which flags its help text advertises, what
+# version it reports — so the answer only changes when the binary does. Re-deriving it per
+# launch costs three spawns of a 276 MB image, and a dispatch burst pays that while the
+# machine is already loading the workers those launches start. Keyed on identity, not just
+# path: a reinstall in place must invalidate it. Only successes are cached, so a broken
+# harness keeps failing loudly on every attempt.
+_PREFLIGHT_CACHE: dict[tuple[str, str, int, int], str] = {}
+
+
 def preflight_harness(kind: str, executable: str) -> str:
     """Fail before dispatch if the configured CLI cannot honor the adapter contract."""
     resolved = shutil.which(executable) if "/" not in executable else executable
     if not resolved or not Path(resolved).is_file():
         raise RuntimeError(f"harness executable not found: {executable}")
+    identity = Path(resolved).stat()
+    cache_key = (kind, str(resolved), identity.st_mtime_ns, identity.st_size)
+    cached = _PREFLIGHT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     required = {
         "codex": ("--json", "--output-schema", "--output-last-message",
                   "--ignore-user-config", "--strict-config", "--sandbox"),
@@ -409,7 +423,9 @@ def preflight_harness(kind: str, executable: str) -> str:
     )
     if version_result.returncode:
         raise RuntimeError(f"{kind} harness version check failed: {version_result.stderr.strip()}")
-    return (version_result.stdout or version_result.stderr).strip()
+    version = (version_result.stdout or version_result.stderr).strip()
+    _PREFLIGHT_CACHE[cache_key] = version
+    return version
 
 
 def preflight_authentication(
@@ -423,6 +439,14 @@ def preflight_authentication(
     carries no refresh token, so no lock is needed. Engine-side checks against a SHARED home
     go through `auth.run_auth_status`, which holds the credential lock.
     """
+    if kind == "claude":
+        # `claude auth status --json` cannot answer this question. Measured against CLI
+        # 2.1.221 it exits 0 and reports `loggedIn: true` for a fabricated token, and for an
+        # expired credential alike — so a pass here has never meant the launch can
+        # authenticate. Skipping it removes a spawn of a 276 MB binary per launch and
+        # forfeits no signal. A launch that genuinely cannot authenticate still fails, and
+        # the reconciler still classifies it from the attempt's own output.
+        return
     command = auth_status_command(kind, executable)
     if command is None:
         return
