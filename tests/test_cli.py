@@ -206,6 +206,7 @@ def test_harness_doctor_json_checks_preflight_and_isolated_login(
         "probe": "not_applicable",
         "instructions": "not_configured",
         "ready": True,
+        "not_ready_because": [],
     }
     assert calls[0][0] == ["codex", "login", "status"]
     assert calls[0][1]["env"]["CODEX_HOME"] == str(state_dir)

@@ -308,12 +308,21 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
     # the verdict rather than reported as failures — an expired credential beside a working
     # token is not a broken harness. What remains unchecked either way: neither branch proves
     # the credential in use still works, only a real dispatch does.
-    credential_checks = (
-        () if uses_setup_token else (login == "authenticated", probe != auth.REVOKED)
-    )
-    ready = all((state_dir_exists, state_dir_writable, executable, preflight == "passed",
-                 state_dir_private, instructions in {"not_configured", "current"},
-                 *credential_checks))
+    checks = {
+        "state_dir_exists": state_dir_exists,
+        "state_dir_writable": state_dir_writable,
+        "state_dir_private": state_dir_private,
+        "executable": bool(executable),
+        "preflight": preflight == "passed",
+        "instructions": instructions in {"not_configured", "current"},
+    }
+    if not uses_setup_token:
+        checks["login"] = login == "authenticated"
+        checks["not_revoked"] = probe != auth.REVOKED
+    ready = all(checks.values())
+    # Name the failing checks. A bare `ready: False` is unactionable when it appears
+    # intermittently and will not reproduce on the next run.
+    not_ready_because = sorted(name for name, passed in checks.items() if not passed)
     report = {
         "name": args.name,
         "kind": harness.kind,
@@ -341,6 +350,7 @@ def cmd_harness_doctor(args: argparse.Namespace) -> int:
         "probe": probe,
         "instructions": instructions,
         "ready": ready,
+        "not_ready_because": not_ready_because,
     }
     if args.json:
         print(json.dumps(report, sort_keys=True))
