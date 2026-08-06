@@ -8,7 +8,7 @@ from orchestra import git_ops, layout
 from orchestra.archive import merge_and_archive
 from orchestra.attempt import Attempt, AttemptStore
 from orchestra.config import Config
-from orchestra.dispatch import done_numbers
+from orchestra.dispatch import done_numbers, dropped_numbers
 from orchestra.enginelock import engine_lock
 from orchestra.issue import KNOWN_STATUSES, block_issue, exception_detail, needs_network_approval
 from orchestra.projects import Project, find_project, read_projects
@@ -269,6 +269,7 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
         issues = read_queue(qf)
         known = {i.number for i in issues}
         done = done_numbers(root, project)
+        dropped = dropped_numbers(root, project)
         dep_graph = {i.number: i.depends_on for i in issues}
         changed = False
         for issue in issues:
@@ -289,8 +290,8 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
                 continue
             validation = validate_structural(
                 issue, project_path=project.path, orchestra_root=root,
-                known_ids=known, archived_ids=done, base_branch=project.branch,
-                dep_graph=dep_graph,
+                known_ids=known, archived_ids=done, dropped_ids=dropped,
+                base_branch=project.branch, dep_graph=dep_graph,
             )
             reasons = list(validation.reasons)
             if config.workflows and project.workflow not in config.workflows:

@@ -43,6 +43,8 @@ reach its own model API.
     orchestra reject  <project> <n> --note "why"   # awaiting_review -> needs_rework; blocked -> open
     orchestra hold    <project> <n>        # park inactive work until explicit release
     orchestra release <project> <n>        # held -> open for normal validation
+    orchestra archive <project> <n>... --reason "..."  # retire: work landed outside the loop
+    orchestra drop    <project> <n>... --reason "..."  # retire: issue is moot, nothing landed
     orchestra logs <project> <n> -f        # watch a worker
 
 `reject` is state-sensitive: it sends reviewed work back for revision, while a blocked

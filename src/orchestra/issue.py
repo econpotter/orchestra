@@ -15,7 +15,7 @@ _TRUE = {"true", "yes", "1", "on"}
 # silently).
 KNOWN_STATUSES = {
     "open", "held", "validated", "needs_rework", "in_progress",
-    "committed", "awaiting_review", "blocked", "archived",
+    "committed", "awaiting_review", "blocked", "archived", "dropped",
 }
 
 
@@ -44,6 +44,7 @@ class Issue:
     crash_retries: int = 0
     network: bool = False
     network_approved: bool = False
+    archive_reason: str = ""
 
 
 def needs_network_approval(issue: Issue, hold_network_issues: bool) -> bool:
@@ -186,6 +187,7 @@ def parse_issue(block: str) -> Issue:
         crash_retries=crash_retries,
         network=_parse_bool(fields.get("Network", "")),
         network_approved=_parse_bool(fields.get("Network-Approved", "")),
+        archive_reason=fields.get("Archive-Reason", "").strip(),
     )
 
 
@@ -197,6 +199,7 @@ def render_issue(issue: Issue) -> str:
     lines = [
         f"## #{issue.number:03d} {issue.project}: {issue.title}",
         f"Status: {issue.status}",
+        f"Archive-Reason: {issue.archive_reason}",
         f"Priority: {issue.priority}",
         f"Plan: {_fmt_opt(issue.plan)}",
         f"Spec: {_fmt_opt(issue.spec)}",

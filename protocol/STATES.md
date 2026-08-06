@@ -12,7 +12,8 @@ Statuses an issue moves through. `dispatch` records handles in workers.json and 
 | needs_rework | verify rejected; re-dispatch to worker with feedback (Retries++) | reconcile |
 | awaiting_review | verify accepted OR retry cap hit; awaiting human sign-off | reconcile |
 | blocked | unexpected stop; free-text `### Blocked Reason` (stuck / crash / invalid) | reconcile |
-| archived | human approved; branch merged into base and issue moved to queue/archive/<project>.md | merge-and-archive |
+| archived | human approved; branch merged into base and issue moved to queue/archive/<project>.md | merge-and-archive / `orchestra archive` |
+| dropped | human retired the issue without landing anything; moved to queue/archive/<project>.md | `orchestra drop` |
 
 ## Stop model
 - **Soft block** — worker logs a decision in `### Decisions` and keeps going; reviewed
@@ -31,8 +32,35 @@ in_progress --commit--> committed --verify(accept)--> awaiting_review --human ap
 in_progress --self-reported stuck--> blocked
 committed --verify(reject)--> needs_rework --dispatch--> in_progress
 needs_rework --retry cap hit--> awaiting_review
+any live status except archived/dropped --human archive (manual)--> archived
+any live status except archived/dropped --human drop--> dropped
 ```
 `Retries` counts only verify↔worker bounces. Verifier feedback (`### Verifier Feedback`) carries reject complaints and is included in the issue when a worker bounces.
+
+## Manual retirement: `archive` and `drop`
+Some issues never finish through the loop. `orchestra archive <project> <n>... --reason "..."`
+retires one or more live issues whose work landed outside the loop (done by hand on the
+project branch, or merged manually) — `Status: archived`, same meaning as merge-and-archive.
+`orchestra drop <project> <n>... --reason "..."` retires issues that are moot — superseded,
+obsolete, or not worth doing — `Status: dropped`, nothing landed. `--reason` is required on
+both and is stored verbatim in the new `Archive-Reason` field.
+
+Both move the issue to `queue/archive/<project>.md` and remove it from the live queue, write
+the archive file first so a crash between the two writes leaves the issue recoverable, remove
+the worktree (best-effort — a failure warns and does not abort), and drop the worktree DB when
+configured. **Both leave the branch**: deleting it could destroy work the operator has not
+read, so instead its name and its unmerged commit count against the project base are printed
+for a manual cleanup. Each guards a number against a live handle in
+`.orchestra/workers.json` ("kill and reconcile it first"), a number absent from the live
+queue, and a number already `archived`/`dropped` — a refusal is reported and the other numbers
+in the same invocation still process; the command exits nonzero if any number failed.
+
+`archived` satisfies a `Depends On`; `dropped` does not — nothing landed, so the dependency can
+never be satisfied. `drop` therefore cascades: every live issue in the project depending on the
+dropped number is immediately `blocked` with `depends on dropped #N: <reason>`, since reconcile
+only re-validates issues sitting at `open` and would otherwise leave an already-`validated`
+dependent stuck forever with no signal. `archive` does not cascade — an archived dependency is
+satisfied as-is.
 
 ## Attempt recovery
 Every harness execution finalizes a durable attempt manifest. Reconcile derives recovery from

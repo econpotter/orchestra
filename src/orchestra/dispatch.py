@@ -177,8 +177,19 @@ def done_numbers(root: str | Path, project: Project) -> set[int]:
         nums |= {i.number for i in read_queue(qf) if i.status in _LIVE_DONE_STATUSES}
     af = layout.archive_file(root, project.name)
     if af.exists():
-        nums |= {i.number for i in read_queue(af)}
+        # A `dropped` row reserves its number but never satisfies a Depends On — nothing
+        # landed. Exclude it here; `dropped_numbers` below exposes it separately so
+        # validate_structural can tell "dropped" from "unknown".
+        nums |= {i.number for i in read_queue(af) if i.status != "dropped"}
     return nums
+
+
+def dropped_numbers(root: str | Path, project: Project) -> set[int]:
+    root = Path(root)
+    af = layout.archive_file(root, project.name)
+    if not af.exists():
+        return set()
+    return {i.number for i in read_queue(af) if i.status == "dropped"}
 
 
 def build_context(
@@ -423,6 +434,7 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
     candidates: list[tuple[Project, Issue, str]] = []
     for project in read_projects(root / "PROJECTS.md"):
         done = done_numbers(root, project)
+        dropped = dropped_numbers(root, project)
         qf = layout.queue_file(root, project.name)
         if not qf.exists():
             continue
@@ -438,8 +450,8 @@ def _dispatch(root: str | Path, config: Config, *, started: str) -> list[str]:
             if role == "validator":
                 res = validate_structural(
                     issue, project_path=project.path, orchestra_root=root,
-                    known_ids=known, archived_ids=done, base_branch=project.branch,
-                    dep_graph=dep_graph,
+                    known_ids=known, archived_ids=done, dropped_ids=dropped,
+                    base_branch=project.branch, dep_graph=dep_graph,
                 )
                 if not res.ok:
                     continue  # structurally invalid — reconcile will block it

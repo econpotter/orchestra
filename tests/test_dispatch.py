@@ -10,7 +10,8 @@ import pytest
 
 from orchestra.config import load_config
 from orchestra.dispatch import _start_supervisor as real_start_supervisor
-from orchestra.dispatch import dispatch
+from orchestra.dispatch import dispatch, done_numbers, dropped_numbers
+from orchestra.projects import find_project, read_projects
 from orchestra.registry import issue_key, load_registry
 from orchestra.selection import pid_alive
 
@@ -430,6 +431,41 @@ sandbox:
     cfg = load_config(tmp_path / "config.yaml")
     launched = dispatch(tmp_path, cfg, started="t")
     assert launched == []
+
+
+def test_done_numbers_excludes_dropped_includes_archived(tmp_path: Path):
+    _setup(tmp_path, _issue(1, "open"))
+    af = tmp_path / "queue" / "archive" / "wf.md"
+    af.parent.mkdir(parents=True)
+    af.write_text(
+        "## #007 wf: landed\nStatus: archived\nPriority: 5\nPlan: null\nSpec: null\n"
+        "Depends On: null\nRetries: 0\nWorker: null\nAcceptance:\n- [x] x\n"
+        "### Decisions\n### Blocked Reason\n\n"
+        "## #008 wf: superseded\nStatus: dropped\nArchive-Reason: moot\n"
+        "Priority: 5\nPlan: null\nSpec: null\nDepends On: null\nRetries: 0\nWorker: null\n"
+        "Acceptance:\n- [x] x\n### Decisions\n### Blocked Reason\n"
+    )
+    project = find_project(read_projects(tmp_path / "PROJECTS.md"), "wf")
+    assert done_numbers(tmp_path, project) == {7}
+    assert dropped_numbers(tmp_path, project) == {8}
+
+
+def test_dispatch_skips_issue_depending_on_dropped_number(tmp_path: Path):
+    """`done_numbers` excludes dropped rows, so `role_for_issue`'s dep gate never clears —
+    a dropped dependency can never become dispatchable, unlike an archived one."""
+    issue = _issue(1, "validated").replace("Depends On: null", "Depends On: 7")
+    _setup(tmp_path, issue)
+    af = tmp_path / "queue" / "archive" / "wf.md"
+    af.parent.mkdir(parents=True)
+    af.write_text(
+        "## #007 wf: superseded\nStatus: dropped\nArchive-Reason: superseded by #9\n"
+        "Priority: 5\nPlan: null\nSpec: null\nDepends On: null\nRetries: 0\nWorker: null\n"
+        "Acceptance:\n- [x] x\n### Decisions\n### Blocked Reason\n"
+    )
+    cfg = load_config(tmp_path / "config.yaml")
+    launched = dispatch(tmp_path, cfg, started="2026-06-26T00:00:00Z")
+    assert launched == []
+    assert load_registry(tmp_path / ".orchestra" / "workers.json") == {}
 
 
 def test_dispatch_worktree_db_creates_clone_after_seed(tmp_path, monkeypatch):

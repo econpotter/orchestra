@@ -21,6 +21,12 @@ def commit_exists_on_branch(repo: Path, branch: str, base: str) -> bool:
     return int(out) > 0
 
 
+def unmerged_commit_count(repo: Path, branch: str, base: str) -> int:
+    """Commits on `branch` not reachable from `base` — what an operator would lose by
+    deleting the branch. Used to report a surviving branch after a manual archive/drop."""
+    return int(_git(repo, "rev-list", "--count", f"{base}..{branch}").stdout.strip())
+
+
 def file_in_branch(repo: Path, branch: str, path: str) -> bool:
     """True if `path` exists in `branch`'s committed tree (not just on disk). Used to
     validate that a worker — which branches off `branch` — will actually have the file."""

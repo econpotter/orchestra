@@ -28,6 +28,7 @@ from orchestra.issue import (
     branch_name,
     exception_detail,
 )
+from orchestra.manual_archive import cascade_dropped, manual_archive
 from orchestra.projects import (
     DuplicateProjectError,
     ensure_name_available,
@@ -844,6 +845,42 @@ def cmd_hold(args: argparse.Namespace) -> int:
     return 0
 
 
+def _manual_archive_command(args: argparse.Namespace, *, status: str) -> int:
+    """Shared body for `orchestra archive`/`orchestra drop`: several numbers, one shared
+    reason. Each number is independent — a refusal is reported and the rest still process —
+    so the exit code, not an early return, carries the overall result."""
+    root = Path(args.root)
+    project = _resolve_project(args)
+    if project is None:
+        return 2
+    failed = False
+    for number in args.number:
+        try:
+            outcome = manual_archive(root, project, number, status=status, reason=args.reason)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            failed = True
+            continue
+        if status == "dropped":
+            blocked = cascade_dropped(root, project, number, args.reason)
+            if blocked:
+                names = ", ".join(f"#{n}" for n in blocked)
+                print(f"blocked dependent(s) of {args.project}#{number:03d}: {names}")
+        print(
+            f"{status} {args.project}#{number:03d} — branch {outcome.branch} left in place "
+            f"({outcome.unmerged_commits} unmerged commit(s) against {project.branch})"
+        )
+    return 1 if failed else 0
+
+
+def cmd_archive(args: argparse.Namespace) -> int:
+    return _manual_archive_command(args, status="archived")
+
+
+def cmd_drop(args: argparse.Namespace) -> int:
+    return _manual_archive_command(args, status="dropped")
+
+
 def cmd_kill(args: argparse.Namespace) -> int:
     root = Path(args.root)
     project = _resolve_project(args)
@@ -1117,6 +1154,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_hold.add_argument("project")
     p_hold.add_argument("number", type=int)
     p_hold.set_defaults(func=cmd_hold)
+
+    for name, fn, help_text in (
+        ("archive", cmd_archive, "retire live issue(s): the work landed outside the loop"),
+        ("drop", cmd_drop, "retire live issue(s): moot, nothing landed"),
+    ):
+        pp = sub.add_parser(name, help=help_text)
+        pp.add_argument("project")
+        pp.add_argument("number", type=int, nargs="+")
+        pp.add_argument("--reason", required=True)
+        pp.set_defaults(func=fn)
 
     p_diff = sub.add_parser("diff", help="show an issue's branch diff")
     p_diff.add_argument("project")

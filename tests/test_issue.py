@@ -219,6 +219,35 @@ def test_legacy_block_defaults_new_fields():
     assert parse_issue(render_issue(issue)) == issue
 
 
+def test_archive_reason_round_trip():
+    block = """\
+## #061 wf: retired by hand
+Status: dropped
+Archive-Reason: superseded by #112
+Priority: 2
+Plan: null
+Spec: null
+Depends On: null
+Retries: 0
+Worker: null
+Acceptance:
+- [ ] do it
+### Decisions
+### Blocked Reason
+"""
+    issue = parse_issue(block)
+    assert issue.status == "dropped"
+    assert issue.archive_reason == "superseded by #112"
+    assert parse_issue(render_issue(issue)) == issue
+
+
+def test_legacy_block_without_archive_reason_defaults_empty():
+    # A block written before this field existed still parses, with a safe default.
+    issue = parse_issue(BLOCK)
+    assert issue.archive_reason == ""
+    assert parse_issue(render_issue(issue)) == issue
+
+
 def test_verifier_feedback_defaults_empty():
     from orchestra.issue import parse_issue
     block = """\

@@ -3,7 +3,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 STATUSES = [
     "open", "validated", "in_progress", "committed",
-    "needs_rework", "awaiting_review", "blocked", "merged", "archived",
+    "needs_rework", "awaiting_review", "blocked", "merged", "archived", "dropped",
 ]
 
 

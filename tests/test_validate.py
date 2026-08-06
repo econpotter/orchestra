@@ -88,6 +88,29 @@ def test_unknown_dependency_still_blocks_with_archived(tmp_path):
     assert any("#9" in r for r in res.reasons)
 
 
+def test_dependency_on_dropped_issue_reports_dropped_not_unknown(tmp_path):
+    text = GOOD.replace("Depends On: null", "Depends On: 7")
+    (tmp_path / "projects" / "wf" / "docs" / "specs").mkdir(parents=True)
+    (tmp_path / "projects" / "wf" / "docs" / "specs" / "x.md").write_text("spec")
+    res = validate_structural(_issue(text), project_path="projects/wf",
+                              orchestra_root=tmp_path, known_ids={1, 2}, dropped_ids={7})
+    assert res.ok is False
+    assert any("Depends On references dropped issue #7" in r for r in res.reasons)
+    assert not any("unknown issue #7" in r for r in res.reasons)
+
+
+def test_unknown_dependency_still_blocks_with_dropped(tmp_path):
+    """A truly unknown number — absent from live queue, archive, AND dropped — still
+    blocks as unknown, not as dropped."""
+    text = GOOD.replace("Depends On: null", "Depends On: 9")
+    (tmp_path / "projects" / "wf" / "docs" / "specs").mkdir(parents=True)
+    (tmp_path / "projects" / "wf" / "docs" / "specs" / "x.md").write_text("spec")
+    res = validate_structural(_issue(text), project_path="projects/wf",
+                              orchestra_root=tmp_path, known_ids={1, 2}, dropped_ids={7})
+    assert res.ok is False
+    assert any("unknown issue #9" in r for r in res.reasons)
+
+
 def test_referenced_spec_still_must_exist(tmp_path):
     res = validate_structural(_issue(GOOD), project_path="projects/wf",
                               orchestra_root=tmp_path, known_ids=set())

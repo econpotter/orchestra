@@ -1,9 +1,11 @@
 import json
+import subprocess
 
 import pytest
 
 from orchestra.attempt import AttemptStore
 from orchestra.cli import main
+from orchestra.queue import find_issue, read_queue
 
 
 def test_guide_prints_integration_doc(capsys):
@@ -821,3 +823,122 @@ def test_harness_login_reports_a_missing_executable_without_a_traceback(
 
     assert main(["--root", str(tmp_path), "harness", "login", "automation"]) == 1
     assert "claude" in capsys.readouterr().err
+
+
+def _archive_git(repo, *a):
+    subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+
+
+def _archive_issue_block(number: int, status: str, depends_on: str = "null") -> str:
+    return (
+        f"## #{number:03d} wf: thing {number}\nStatus: {status}\nPriority: 1\n"
+        f"Plan: null\nSpec: null\nDepends On: {depends_on}\nRetries: 0\nWorker: null\n"
+        f"Acceptance:\n- [x] x\n### Decisions\n### Blocked Reason\n"
+    )
+
+
+def _archive_setup(root, issues_text: str):
+    (root / "queue").mkdir(parents=True)
+    (root / "queue" / "wf.md").write_text(issues_text)
+    (root / "PROJECTS.md").write_text(
+        "# Projects\n\n## wf\n- Path: projects/wf\n- Branch: main\n"
+        "- Purpose: t\n- Queue: queue/wf.md\n- Focus: none\n"
+    )
+    repo = root / "projects" / "wf"
+    repo.mkdir(parents=True)
+    _archive_git(repo, "init", "-b", "main")
+    _archive_git(repo, "config", "user.email", "t@t.com")
+    _archive_git(repo, "config", "user.name", "t")
+    (repo / "README.md").write_text("x\n")
+    _archive_git(repo, "add", "README.md")
+    _archive_git(repo, "commit", "-m", "init")
+    return repo
+
+
+def test_archive_moves_issue_and_records_reason(tmp_path):
+    _archive_setup(tmp_path, _archive_issue_block(1, "awaiting_review"))
+    rc = main([
+        "--root", str(tmp_path), "archive", "wf", "1",
+        "--reason", "landed by hand in 8c25da7",
+    ])
+    assert rc == 0
+    assert read_queue(tmp_path / "queue" / "wf.md") == []
+    archived = read_queue(tmp_path / "queue" / "archive" / "wf.md")
+    assert archived[0].status == "archived"
+    assert archived[0].archive_reason == "landed by hand in 8c25da7"
+
+
+def test_archive_leaves_dependents_untouched_and_dispatchable(tmp_path):
+    """Unlike `drop`, `archive` does not cascade — an archived dependency IS satisfied, so
+    a dependent must stay exactly as it was and remain dispatchable (done_numbers includes
+    the archived number)."""
+    from orchestra.dispatch import done_numbers
+    from orchestra.projects import find_project, read_projects
+
+    text = (
+        _archive_issue_block(1, "awaiting_review") + "\n"
+        + _archive_issue_block(2, "validated", depends_on="1")
+    )
+    _archive_setup(tmp_path, text)
+    rc = main([
+        "--root", str(tmp_path), "archive", "wf", "1", "--reason", "landed by hand",
+    ])
+    assert rc == 0
+    dependent = find_issue(read_queue(tmp_path / "queue" / "wf.md"), 2)
+    assert dependent.status == "validated"  # untouched
+    assert dependent.blocked_reason == ""
+    project = find_project(read_projects(tmp_path / "PROJECTS.md"), "wf")
+    assert 1 in done_numbers(tmp_path, project)  # dependency satisfied -> #2 dispatchable
+
+
+def test_drop_moves_issue_and_cascades_to_dependents(tmp_path, capsys):
+    text = (
+        _archive_issue_block(1, "open") + "\n"
+        + _archive_issue_block(2, "validated", depends_on="1")
+    )
+    _archive_setup(tmp_path, text)
+    rc = main([
+        "--root", str(tmp_path), "drop", "wf", "1", "--reason", "superseded by #9",
+    ])
+    assert rc == 0
+    dropped = read_queue(tmp_path / "queue" / "archive" / "wf.md")
+    assert dropped[0].status == "dropped"
+    assert dropped[0].archive_reason == "superseded by #9"
+    dependent = find_issue(read_queue(tmp_path / "queue" / "wf.md"), 2)
+    assert dependent.status == "blocked"
+    assert "depends on dropped #1: superseded by #9" in dependent.blocked_reason
+    assert "blocked dependent(s) of wf#001: #2" in capsys.readouterr().out
+
+
+def test_archive_multiple_numbers_mixed_success_and_failure(tmp_path, capsys):
+    text = (
+        _archive_issue_block(1, "awaiting_review") + "\n"
+        + _archive_issue_block(2, "archived")  # already terminal -> refused
+    )
+    _archive_setup(tmp_path, text)
+    rc = main([
+        "--root", str(tmp_path), "archive", "wf", "1", "2", "--reason", "cleanup",
+    ])
+    assert rc == 1  # any failure -> nonzero exit
+    err = capsys.readouterr().err
+    assert "#2" in err and "already archived" in err
+    # #2 was refused and left untouched; #1, the OTHER number in the same invocation,
+    # still processed
+    live = find_issue(read_queue(tmp_path / "queue" / "wf.md"), 2)
+    assert live is not None and live.status == "archived"
+    archived = {i.number for i in read_queue(tmp_path / "queue" / "archive" / "wf.md")}
+    assert archived == {1}
+
+
+def test_archive_refuses_when_reason_is_missing(tmp_path, capsys):
+    _archive_setup(tmp_path, _archive_issue_block(1, "awaiting_review"))
+    with pytest.raises(SystemExit):
+        main(["--root", str(tmp_path), "archive", "wf", "1"])
+    assert "--reason" in capsys.readouterr().err
+
+
+def test_drop_refuses_when_reason_is_missing(tmp_path, capsys):
+    _archive_setup(tmp_path, _archive_issue_block(1, "open"))
+    with pytest.raises(SystemExit):
+        main(["--root", str(tmp_path), "drop", "wf", "1"])
+    assert "--reason" in capsys.readouterr().err

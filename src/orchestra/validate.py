@@ -44,6 +44,7 @@ def validate_structural(
     orchestra_root: Path,
     known_ids: set[int],
     archived_ids: set[int] | None = None,
+    dropped_ids: set[int] | None = None,
     base_branch: str | None = None,
     dep_graph: dict[int, list[int]] | None = None,
 ) -> ValidationResult:
@@ -78,14 +79,18 @@ def validate_structural(
     if not issue.acceptance:
         reasons.append("Acceptance needs >=1 checkbox")
 
-    # Resolve deps against the live queue AND archived/merged numbers — an archived issue
-    # has left the live queue but is still a satisfied dependency (matches selection.py's
+    # Resolve deps against the live queue, archived/merged numbers, AND dropped numbers —
+    # dropped is a known outcome, not an unknown reference (matches selection.py's
     # role_for_issue, which gates on done_numbers). Without this, an issue depending on an
     # archived number blocks here while dispatch passes it → a re-block livelock.
-    resolvable = known_ids if archived_ids is None else known_ids | archived_ids
+    resolvable = known_ids | (archived_ids or set()) | (dropped_ids or set())
     for dep in issue.depends_on:
         if dep not in resolvable:
             reasons.append(f"Depends On references unknown issue #{dep}")
+        elif dropped_ids and dep in dropped_ids:
+            # Known but never satisfiable: dropped means nothing landed, so this issue
+            # would otherwise sit forever waiting on a dependency that can never resolve.
+            reasons.append(f"Depends On references dropped issue #{dep}")
 
     # A self-dependency or a dependency cycle can never be satisfied — every member waits on
     # a peer that waits on it — so the issue would sit at `validated` forever, never
