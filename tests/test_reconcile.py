@@ -97,6 +97,31 @@ def test_worker_self_reported_block_never_claims_success(tmp_path: Path, monkeyp
     assert manifest["retry_disposition"] == "blocked"
 
 
+def test_verifier_accept_records_evidence(tmp_path: Path, monkeypatch):
+    _setup(tmp_path, status="committed")
+    status, manifest = _run(tmp_path, monkeypatch, "accept")
+    issue = find_issue(read_queue(tmp_path / "queue" / "wf.md"), 1)
+    assert status == "awaiting_review"
+    assert issue.verification == "fake evidence"
+    assert issue.verifier_feedback == ""
+    assert manifest["retry_disposition"] == "accept"
+
+
+def test_verifier_accept_with_empty_evidence_leaves_verification_unchanged(
+    tmp_path: Path, monkeypatch,
+):
+    _setup(tmp_path, status="committed")
+    issues = read_queue(tmp_path / "queue" / "wf.md")
+    find_issue(issues, 1).verification = "prior verification evidence"
+    write_queue(tmp_path / "queue" / "wf.md", issues)
+
+    status, manifest = _run(tmp_path, monkeypatch, "accept_no_evidence")
+
+    issue = find_issue(read_queue(tmp_path / "queue" / "wf.md"), 1)
+    assert status == "awaiting_review"
+    assert issue.verification == "prior verification evidence"
+
+
 def test_verifier_reject_advances_once_to_needs_rework(tmp_path: Path, monkeypatch):
     _setup(tmp_path, status="committed")
     status, manifest = _run(tmp_path, monkeypatch, "reject")

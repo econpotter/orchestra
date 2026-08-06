@@ -181,6 +181,33 @@ retry: missing test for the 5xx path
     assert parse_issue(render_issue(issue)) == issue
 
 
+def test_verification_round_trip():
+    from orchestra.issue import parse_issue, render_issue
+    block = """\
+## #052 wf: thing
+Status: awaiting_review
+Priority: 2
+Plan: null
+Spec: docs/specs/x.md
+Depends On: null
+Retries: 0
+Acceptance:
+- [x] do it
+### Decisions
+### Blocked Reason
+### Verifier Feedback
+### Verification
+checked the 5xx retry path against the test log; all green
+"""
+    issue = parse_issue(block)
+    assert issue.verification == "checked the 5xx retry path against the test log; all green"
+    assert parse_issue(render_issue(issue)) == issue
+
+
+def test_verification_defaults_empty():
+    assert parse_issue(BLOCK).verification == ""
+
+
 def test_crash_retries_and_network_round_trip():
     block = """\
 ## #060 wf: netjob

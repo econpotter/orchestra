@@ -58,15 +58,25 @@ def main() -> int:
         outcome, decisions = "validated", ""
     elif role == "verifier" and mode == "accept":
         outcome, decisions = "accept", ""
+    elif role == "verifier" and mode == "accept_no_evidence":
+        # Models a verifier that accepts but reports no proof — reconcile must not blank a
+        # prior Verification section when there is nothing new to record.
+        outcome, decisions = "accept", ""
     elif role == "verifier" and mode == "reject":
         outcome, decisions = "reject", "retry: fake complaint"
     else:
         outcome, decisions = "blocked", ""
     failed = outcome == "blocked"
+    if failed:
+        evidence = "stuck: fake"
+    elif mode == "accept_no_evidence":
+        evidence = ""
+    else:
+        evidence = "fake evidence"
     result = {
         "schema_version": 1, "outcome": outcome, "decisions": decisions,
         "failure_category": "needs_human" if failed else "",
-        "evidence": "stuck: fake" if failed else "fake evidence",
+        "evidence": evidence,
         "requires_human": failed,
     }
     Path(args.output_last_message).write_text(json.dumps(result))

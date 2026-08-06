@@ -45,6 +45,7 @@ class Issue:
     network: bool = False
     network_approved: bool = False
     archive_reason: str = ""
+    verification: str = ""
 
 
 def needs_network_approval(issue: Issue, hold_network_issues: bool) -> bool:
@@ -131,6 +132,7 @@ def parse_issue(block: str) -> Issue:
     decisions: list[str] = []
     blocked: list[str] = []
     verifier: list[str] = []
+    verification: list[str] = []
     section = "fields"
     for line in lines[1:]:
         stripped = line.strip()
@@ -142,6 +144,8 @@ def parse_issue(block: str) -> Issue:
             section = "blocked"
         elif stripped == "### Verifier Feedback":
             section = "verifier"
+        elif stripped == "### Verification":
+            section = "verification"
         elif section == "acceptance" and line.lstrip().startswith("- ["):
             checked = line.lstrip()[3:4].lower() == "x"
             acceptance.append(
@@ -153,6 +157,8 @@ def parse_issue(block: str) -> Issue:
             blocked.append(line)
         elif section == "verifier":
             verifier.append(line)
+        elif section == "verification":
+            verification.append(line)
         elif section == "fields" and ":" in line:
             key, _, val = line.partition(":")
             fields[key.strip()] = val.strip()
@@ -188,6 +194,7 @@ def parse_issue(block: str) -> Issue:
         network=_parse_bool(fields.get("Network", "")),
         network_approved=_parse_bool(fields.get("Network-Approved", "")),
         archive_reason=fields.get("Archive-Reason", "").strip(),
+        verification="\n".join(verification).strip(),
     )
 
 
@@ -225,6 +232,9 @@ def render_issue(issue: Issue) -> str:
     lines.append("### Verifier Feedback")
     if issue.verifier_feedback:
         lines.append(issue.verifier_feedback)
+    lines.append("### Verification")
+    if issue.verification:
+        lines.append(issue.verification)
     return "\n".join(lines)
 
 

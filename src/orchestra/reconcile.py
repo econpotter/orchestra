@@ -243,6 +243,9 @@ def _reconcile(root: str | Path, config: Config) -> list[tuple[str, str]]:
         elif decision.action == "validated":
             issue.status = "validated"
         elif decision.action == "accept":
+            evidence = (result.evidence or result.decisions) if result else ""
+            if evidence:
+                issue.verification = evidence
             issue.verifier_feedback = ""
             issue.status = "awaiting_review"
         elif decision.action == "reject":
