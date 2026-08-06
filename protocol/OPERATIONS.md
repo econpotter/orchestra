@@ -7,7 +7,7 @@ in Phase B; the deterministic helpers below are Phase A.)
 ## Phase A helpers (implemented)
 - `tools/validate --root ROOT PROJECT NUMBER` — structural validation. Exit 0 valid,
   1 invalid (reasons on stdout), 2 not found / malformed.
-- `tools/status-set --root ROOT PROJECT NUMBER STATUS [--reason] [--retries] [--worker]`
+- `tools/status-set --root ROOT PROJECT NUMBER STATUS [--reason] [--retries]`
   — set fields on one issue.
 - `tools/worktree-create --root ROOT PROJECT NUMBER` — create the issue worktree on
   branch `issue/NNN-slug` off the project's base branch; prints the path.

@@ -36,7 +36,6 @@ class Issue:
     spec: str | None
     depends_on: list[int]
     retries: int
-    worker: str | None
     acceptance: list[AcceptanceItem]
     decisions: str
     blocked_reason: str
@@ -185,7 +184,6 @@ def parse_issue(block: str) -> Issue:
         spec=_opt(fields.get("Spec", "")),
         depends_on=_parse_depends(fields.get("Depends On", "")),
         retries=retries,
-        worker=_opt(fields.get("Worker", "")),
         acceptance=acceptance,
         decisions="\n".join(decisions).strip(),
         blocked_reason="\n".join(blocked).strip(),
@@ -214,7 +212,6 @@ def render_issue(issue: Issue) -> str:
         f"Network-Approved: {'true' if issue.network_approved else 'false'}",
         f"Retries: {issue.retries}",
         f"Crash-Retries: {issue.crash_retries}",
-        f"Worker: {_fmt_opt(issue.worker)}",
     ]
     # Only terminal rows carry a reason. Rendering it unconditionally would add an empty
     # field to every live issue in every queue file on the next write.

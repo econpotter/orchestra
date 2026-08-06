@@ -14,7 +14,6 @@ Depends On: null
 Network: true
 Network-Approved: false
 Retries: 0
-Worker: null
 Acceptance:
 - [ ] client retries 5xx with exponential backoff, max 3
 - [ ] covered by tests; existing suite green

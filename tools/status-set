@@ -17,7 +17,6 @@ def main() -> int:
     ap.add_argument("status")
     ap.add_argument("--reason", default=None)
     ap.add_argument("--retries", type=int, default=None)
-    ap.add_argument("--worker", default=None)
     args = ap.parse_args()
 
     qf = layout.queue_file(args.root, args.project)
@@ -32,8 +31,6 @@ def main() -> int:
         issue.blocked_reason = args.reason
     if args.retries is not None:
         issue.retries = args.retries
-    if args.worker is not None:
-        issue.worker = None if args.worker.lower() in {"null", "none", ""} else args.worker
 
     write_queue(qf, issues)
     return 0

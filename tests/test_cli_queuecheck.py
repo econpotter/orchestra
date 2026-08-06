@@ -70,7 +70,7 @@ def _held_issue(root: Path):
     qf = root / "queue" / "wf.md"
     issue = Issue(
         number=1, project="wf", title="netjob", status="held", priority=5,
-        plan=None, spec=None, depends_on=[], retries=0, worker=None,
+        plan=None, spec=None, depends_on=[], retries=0,
         acceptance=[AcceptanceItem(checked=False, text="fetch")], decisions="",
         blocked_reason="", verifier_feedback="", network=True,
     )

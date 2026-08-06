@@ -599,7 +599,7 @@ def cmd_issue_add(args: argparse.Namespace) -> int:
                 number=n, project=args.project, title=p["title"],
                 status="held" if args.held else "open",
                 priority=args.priority, plan=p["plan"], spec=None, depends_on=[],
-                retries=0, worker=None, acceptance=[], decisions="",
+                retries=0, acceptance=[], decisions="",
                 blocked_reason="", verifier_feedback="", network=args.network,
             ))
             n += 1
@@ -626,7 +626,7 @@ def cmd_issue_add(args: argparse.Namespace) -> int:
         status="held" if args.held else "open",
         priority=args.priority, plan=args.plan, spec=args.spec,
         depends_on=depends_on,
-        retries=0, worker=None,
+        retries=0,
         acceptance=[AcceptanceItem(checked=False, text=t) for t in (args.accept or [])],
         decisions="", blocked_reason="", verifier_feedback="", network=args.network,
     )

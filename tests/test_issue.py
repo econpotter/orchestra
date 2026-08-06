@@ -29,7 +29,6 @@ def test_parse_issue():
     assert issue.priority == 3
     assert issue.plan.endswith("api-resilience.md#retry")
     assert issue.depends_on == [12, 15]
-    assert issue.worker is None
     assert len(issue.acceptance) == 2
     assert issue.acceptance[0].checked is False
     assert issue.acceptance[1].checked is True
@@ -279,6 +278,30 @@ def test_live_issue_renders_no_archive_reason_line():
     # Only terminal rows carry the field: a live issue must render byte-identically to
     # before it existed, or the next queue write churns every issue in every project.
     assert "Archive-Reason" not in render_issue(parse_issue(BLOCK))
+
+
+def test_legacy_worker_field_is_ignored_and_dropped_on_write():
+    # `Worker` was removed from the schema; every archived issue on disk still carries a
+    # `Worker: null` line. parse_issue treats it like any other unknown field line — silently
+    # ignored — so old blocks keep parsing, and the line simply disappears on the next write.
+    block = """\
+## #062 wf: legacy row
+Status: open
+Priority: 1
+Plan: null
+Spec: docs/specs/x.md
+Depends On: null
+Retries: 0
+Worker: agent-3
+Acceptance:
+- [ ] do it
+### Decisions
+### Blocked Reason
+"""
+    issue = parse_issue(block)
+    assert issue.status == "open"
+    assert not hasattr(issue, "worker")
+    assert "Worker" not in render_issue(issue)
 
 
 def test_verifier_feedback_defaults_empty():
