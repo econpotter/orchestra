@@ -15,8 +15,8 @@ Network: true
 Network-Approved: false
 Retries: 0
 Acceptance:
-- [ ] client retries 5xx with exponential backoff, max 3
-- [ ] covered by tests; existing suite green
+- client retries 5xx with exponential backoff, max 3
+- covered by tests; existing suite green
 ### Decisions
 ### Blocked Reason
 ```
@@ -30,7 +30,8 @@ Acceptance:
 - **Depends On** — comma list of issue numbers, or `null`.
 - **Network** — whether the task uses external data or services. `Network-Approved` is
   Orchestra-managed gate state and defaults to `false`.
-- **Acceptance** — ≥1 checkbox; each criterion must be mechanically verifiable.
+- **Acceptance** — ≥1 bullet; each criterion is a specification the work must satisfy and
+  must be mechanically verifiable.
 - **Decisions / Blocked Reason** — free text derived by reconcile from validated structured
   role results and durable attempt evidence.
 

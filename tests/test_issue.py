@@ -29,9 +29,10 @@ def test_parse_issue():
     assert issue.priority == 3
     assert issue.plan.endswith("api-resilience.md#retry")
     assert issue.depends_on == [12, 15]
-    assert len(issue.acceptance) == 2
-    assert issue.acceptance[0].checked is False
-    assert issue.acceptance[1].checked is True
+    assert issue.acceptance == [
+        "client retries 5xx with exponential backoff, max 3",
+        "covered by tests; existing suite green",
+    ]
     assert issue.decisions == "chose backoff base=2s"
     assert issue.blocked_reason == ""
 
@@ -40,6 +41,32 @@ def test_round_trip():
     issue = parse_issue(BLOCK)
     reparsed = parse_issue(render_issue(issue))
     assert reparsed == issue
+
+
+def test_legacy_checkbox_acceptance_parses_to_plain_text():
+    block = """\
+## #001 wf: legacy criteria
+Status: open
+Priority: 1
+Plan: null
+Spec: null
+Depends On: null
+Retries: 0
+Acceptance:
+- [ ] a
+- [x] b
+### Decisions
+### Blocked Reason
+"""
+    assert parse_issue(block).acceptance == ["a", "b"]
+
+
+def test_plain_bullet_acceptance_round_trips():
+    issue = parse_issue(BLOCK)
+    rendered = render_issue(issue)
+    assert "- client retries 5xx with exponential backoff, max 3" in rendered
+    assert "- [ ]" not in rendered and "- [x]" not in rendered
+    assert parse_issue(rendered).acceptance == issue.acceptance
 
 
 def test_dotted_project_name_round_trip():

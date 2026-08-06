@@ -10,7 +10,7 @@ from orchestra.config import load_config
 from orchestra.queue import find_issue, read_queue, write_queue
 from orchestra.reconcile import reconcile
 from orchestra.registry import WorkerHandle, save_registry
-from orchestra.issue import AcceptanceItem, Issue
+from orchestra.issue import Issue
 
 
 def _git(repo, *a):
@@ -71,7 +71,7 @@ def _held_issue(root: Path):
     issue = Issue(
         number=1, project="wf", title="netjob", status="held", priority=5,
         plan=None, spec=None, depends_on=[], retries=0,
-        acceptance=[AcceptanceItem(checked=False, text="fetch")], decisions="",
+        acceptance=["fetch"], decisions="",
         blocked_reason="", verifier_feedback="", network=True,
     )
     write_queue(qf, [issue])

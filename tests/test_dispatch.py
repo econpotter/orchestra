@@ -330,8 +330,8 @@ def test_build_context_includes_title_and_acceptance():
     ctx = build_context(".", project, issue, "worker",
                         workdir=Path("/wt"), model="m", config=cfg)
     assert ctx["title"] == "add retry"
-    assert "- [ ] retries 5xx" in ctx["acceptance"]
-    assert "- [x] tests green" in ctx["acceptance"]
+    assert "- retries 5xx" in ctx["acceptance"]
+    assert "- tests green" in ctx["acceptance"]
 
 
 def test_build_context_workflow_decisions_and_role_paths():

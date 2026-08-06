@@ -221,9 +221,7 @@ def build_context(
         "title": issue.title,
         "plan": _ref(issue.plan),
         "spec": _ref(issue.spec),
-        "acceptance": "\n".join(
-            f"- [{'x' if a.checked else ' '}] {a.text}" for a in issue.acceptance
-        ),
+        "acceptance": "\n".join(f"- {a}" for a in issue.acceptance),
         "workflow": workflow,
         "decisions": issue.decisions,
         "verifier_feedback": issue.verifier_feedback,

@@ -25,7 +25,10 @@ def test_issue_add_writes_open_issue(tmp_path, capsys):
     assert issue.title == "add retry"
     assert issue.priority == 3
     assert issue.plan == "docs/plans/x.md"
-    assert [a.text for a in issue.acceptance] == ["retries 5xx", "tests green"]
+    assert issue.acceptance == ["retries 5xx", "tests green"]
+    written = (tmp_path / "queue" / "wf.md").read_text()
+    assert "- retries 5xx" in written and "- tests green" in written
+    assert "- [ ]" not in written
 
 
 def test_issue_add_depends_on(tmp_path, capsys):

@@ -20,12 +20,6 @@ KNOWN_STATUSES = {
 
 
 @dataclass
-class AcceptanceItem:
-    checked: bool
-    text: str
-
-
-@dataclass
 class Issue:
     number: int
     project: str
@@ -36,7 +30,7 @@ class Issue:
     spec: str | None
     depends_on: list[int]
     retries: int
-    acceptance: list[AcceptanceItem]
+    acceptance: list[str]
     decisions: str
     blocked_reason: str
     verifier_feedback: str
@@ -127,7 +121,7 @@ def parse_issue(block: str) -> Issue:
     if not m:
         raise ValueError(f"bad issue header: {lines[0]!r}")
     fields: dict[str, str] = {}
-    acceptance: list[AcceptanceItem] = []
+    acceptance: list[str] = []
     decisions: list[str] = []
     blocked: list[str] = []
     verifier: list[str] = []
@@ -146,10 +140,12 @@ def parse_issue(block: str) -> Issue:
         elif stripped == "### Verification":
             section = "verification"
         elif section == "acceptance" and line.lstrip().startswith("- ["):
-            checked = line.lstrip()[3:4].lower() == "x"
-            acceptance.append(
-                AcceptanceItem(checked=checked, text=line.split("]", 1)[1].strip())
-            )
+            # Legacy checkbox form (`- [ ] text` / `- [x] text`) — every issue archived before
+            # this change was written this way. Criteria are a specification, not progress
+            # state, so the mark is discarded; only the text is kept.
+            acceptance.append(line.split("]", 1)[1].strip())
+        elif section == "acceptance" and line.lstrip().startswith("- "):
+            acceptance.append(line.lstrip()[2:].strip())
         elif section == "decisions":
             decisions.append(line)
         elif section == "blocked":
@@ -219,7 +215,7 @@ def render_issue(issue: Issue) -> str:
         lines.append(f"Archive-Reason: {issue.archive_reason}")
     lines.append("Acceptance:")
     for item in issue.acceptance:
-        lines.append(f"- [{'x' if item.checked else ' '}] {item.text}")
+        lines.append(f"- {item}")
     lines.append("### Decisions")
     if issue.decisions:
         lines.append(issue.decisions)

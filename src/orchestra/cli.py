@@ -21,7 +21,6 @@ from orchestra.dispatch import dispatch as _dispatch
 from orchestra.envelope import build_execution_envelope
 from orchestra.harness import adapter_for, preflight_harness
 from orchestra.issue import (
-    AcceptanceItem,
     Issue,
     _parse_depends,
     block_issue,
@@ -494,7 +493,7 @@ def cmd_issue_show(args: argparse.Namespace) -> int:
         "status": issue.status, "priority": issue.priority, "plan": issue.plan,
         "spec": issue.spec, "depends_on": issue.depends_on, "retries": issue.retries,
         "network": issue.network, "network_approved": issue.network_approved,
-        "acceptance": [{"checked": a.checked, "text": a.text} for a in issue.acceptance],
+        "acceptance": list(issue.acceptance),
         "decisions": issue.decisions, "blocked_reason": issue.blocked_reason,
         "verifier_feedback": issue.verifier_feedback,
         "branch": branch_name(issue),
@@ -627,7 +626,7 @@ def cmd_issue_add(args: argparse.Namespace) -> int:
         priority=args.priority, plan=args.plan, spec=args.spec,
         depends_on=depends_on,
         retries=0,
-        acceptance=[AcceptanceItem(checked=False, text=t) for t in (args.accept or [])],
+        acceptance=list(args.accept or []),
         decisions="", blocked_reason="", verifier_feedback="", network=args.network,
     )
     qf.parent.mkdir(parents=True, exist_ok=True)
