@@ -1,6 +1,6 @@
 # Manual archive: `orchestra archive` and `orchestra drop`
 
-Status: approved, not started
+Status: implemented 2026-08-06 on branch `archive-command` (e726f37, bec5a57); not merged
 Date: 2026-08-06
 
 ## Goal
@@ -36,6 +36,10 @@ The distinction is load-bearing for dependencies: an `archived` number satisfies
 A one-line issue field, rendered by `render_issue` and parsed by `parse_issue`
 alongside the other `Key: value` lines. Not a `### ` section: the value is one
 line, and a field needs no new section-state handling in the parser.
+
+Rendered only when non-empty, after `Worker:`. Emitting it unconditionally would
+add an empty `Archive-Reason: ` line to every live issue, so the next queue write
+would churn every issue in every project.
 
 `### Decisions` stays the agent's log. Operator rulings do not go in it.
 
@@ -109,32 +113,73 @@ edits the dep or drops them too.
 
 ## Acceptance criteria
 
-- [ ] `orchestra archive <proj> <n>... --reason R` moves each live issue to
+Each box below names the test that covers it.
+
+- [x] `orchestra archive <proj> <n>... --reason R` moves each live issue to
       `queue/archive/<proj>.md` with `Status: archived` and `Archive-Reason: R`,
       and removes it from the live queue.
-- [ ] `orchestra drop` does the same with `Status: dropped`.
-- [ ] `--reason` is required; omitting it is an argparse error on both commands.
-- [ ] Both refuse a number with a live handle in `.orchestra/workers.json`, a
+      (`test_manual_archive.py::test_archive_writes_status_and_reason_and_removes_from_live`,
+      `test_cli.py::test_archive_moves_issue_and_records_reason`)
+- [x] `orchestra drop` does the same with `Status: dropped`.
+      (`test_manual_archive.py::test_drop_writes_status_and_reason`)
+- [x] `--reason` is required; omitting it is an argparse error on both commands.
+      (`test_cli.py::test_archive_refuses_when_reason_is_missing`,
+      `::test_drop_refuses_when_reason_is_missing`)
+- [x] Both refuse a number with a live handle in `.orchestra/workers.json`, a
       number absent from the live queue, and a number already terminal; each
       refusal names the number and reason, other numbers in the same invocation
       still process, exit code is 1.
-- [ ] The worktree is removed and the worktree DB dropped (when configured); a
-      worktree-removal failure warns and the archive still completes.
-- [ ] The branch survives, and its name plus unmerged commit count against the
+      (`test_manual_archive.py::test_refuses_live_handle`, `::test_refuses_unknown_number`,
+      `::test_refuses_already_terminal`,
+      `test_cli.py::test_archive_multiple_numbers_mixed_success_and_failure`)
+- [x] The worktree DB is dropped when configured; a worktree-removal failure warns
+      and the archive still completes.
+      (`test_manual_archive.py::test_worktree_db_dropped_when_configured`,
+      `::test_worktree_removal_failure_warns_and_still_completes`)
+      **Gap:** no test exercises a *successful* worktree removal — only the failure
+      path. The call is one line reusing `git_ops.remove_worktree`, already covered
+      by `merge_and_archive`'s tests, so this is untested-by-inspection, not unknown.
+- [x] The branch survives, and its name plus unmerged commit count against the
       project base is printed.
-- [ ] `Archive-Reason` round-trips through `parse_issue`/`render_issue`; issue
-      blocks written before this change (no such field) still parse.
-- [ ] `done_numbers` excludes `dropped` rows; an issue depending on a dropped
+      (`test_manual_archive.py::test_branch_survives_and_reports_unmerged_count`,
+      `::test_branch_never_cut_reports_zero_unmerged`)
+- [x] `Archive-Reason` round-trips through `parse_issue`/`render_issue`; issue
+      blocks written before this change (no such field) still parse; a live issue
+      renders no such line at all.
+      (`test_issue.py::test_archive_reason_round_trip`,
+      `::test_legacy_block_without_archive_reason_defaults_empty`,
+      `::test_live_issue_renders_no_archive_reason_line`)
+- [x] `done_numbers` excludes `dropped` rows; an issue depending on a dropped
       number does not become dispatchable.
-- [ ] `validate_structural` reports `Depends On references dropped issue #N` for a
+      (`test_dispatch.py::test_done_numbers_excludes_dropped_includes_archived`,
+      `::test_dispatch_skips_issue_depending_on_dropped_number`)
+- [x] `validate_structural` reports `Depends On references dropped issue #N` for a
       dropped dep, and still reports "unknown issue" for a number that exists
       nowhere.
-- [ ] `drop` blocks every live issue in the project depending on the dropped
+      (`test_validate.py::test_dependency_on_dropped_issue_reports_dropped_not_unknown`,
+      `::test_unknown_dependency_still_blocks_with_dropped`)
+- [x] `drop` blocks every live issue in the project depending on the dropped
       number, with `depends on dropped #N: <reason>` as the blocked reason.
-- [ ] `archive` leaves dependents untouched and they remain dispatchable.
-- [ ] `protocol/STATES.md` documents `dropped`, both commands, and the cascade;
+      (`test_manual_archive.py::test_cascade_dropped_blocks_dependents`,
+      `::test_cascade_dropped_ignores_non_dependents`,
+      `test_cli.py::test_drop_moves_issue_and_cascades_to_dependents`)
+- [x] `archive` leaves dependents untouched and they remain dispatchable.
+      (`test_cli.py::test_archive_leaves_dependents_untouched_and_dispatchable`)
+- [x] `protocol/STATES.md` documents `dropped`, both commands, and the cascade;
       `src/orchestra/ORCHESTRA.md` lists both in its command block.
-- [ ] `uv run pytest` green, `uv run ruff check` clean.
+      (`test_docs_present.py` status list; text verified by inspection)
+- [x] `uv run pytest` green, `uv run ruff check` clean.
+      (516 passed, 1 skipped — the skip is pre-existing; ruff clean)
+
+## Outcome
+
+Implemented as specified; no design deviations. Two implementation choices the plan
+left open: guard refusals raise `ValueError` from `manual_archive` and are caught in
+the CLI's per-number loop (mirrors `merge_and_archive`/`cmd_approve`), and
+`cascade_dropped` is a separate function called from `cmd_drop` rather than folded
+into `manual_archive`, which keeps `manual_archive` symmetric between the two verbs.
+
+Out of scope and still out: branch deletion, un-archiving, cross-project batching.
 
 ## Steps
 
