@@ -199,7 +199,6 @@ def render_issue(issue: Issue) -> str:
     lines = [
         f"## #{issue.number:03d} {issue.project}: {issue.title}",
         f"Status: {issue.status}",
-        f"Archive-Reason: {issue.archive_reason}",
         f"Priority: {issue.priority}",
         f"Plan: {_fmt_opt(issue.plan)}",
         f"Spec: {_fmt_opt(issue.spec)}",
@@ -209,8 +208,12 @@ def render_issue(issue: Issue) -> str:
         f"Retries: {issue.retries}",
         f"Crash-Retries: {issue.crash_retries}",
         f"Worker: {_fmt_opt(issue.worker)}",
-        "Acceptance:",
     ]
+    # Only terminal rows carry a reason. Rendering it unconditionally would add an empty
+    # field to every live issue in every queue file on the next write.
+    if issue.archive_reason:
+        lines.append(f"Archive-Reason: {issue.archive_reason}")
+    lines.append("Acceptance:")
     for item in issue.acceptance:
         lines.append(f"- [{'x' if item.checked else ' '}] {item.text}")
     lines.append("### Decisions")

@@ -248,6 +248,12 @@ def test_legacy_block_without_archive_reason_defaults_empty():
     assert parse_issue(render_issue(issue)) == issue
 
 
+def test_live_issue_renders_no_archive_reason_line():
+    # Only terminal rows carry the field: a live issue must render byte-identically to
+    # before it existed, or the next queue write churns every issue in every project.
+    assert "Archive-Reason" not in render_issue(parse_issue(BLOCK))
+
+
 def test_verifier_feedback_defaults_empty():
     from orchestra.issue import parse_issue
     block = """\
