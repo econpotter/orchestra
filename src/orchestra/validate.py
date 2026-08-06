@@ -77,7 +77,7 @@ def validate_structural(
                 reasons.append(f"{label} path not found {where}: {file_part}")
 
     if not issue.acceptance:
-        reasons.append("Acceptance needs >=1 checkbox")
+        reasons.append("Acceptance needs >=1 criterion")
 
     # Resolve deps against the live queue, archived/merged numbers, AND dropped numbers —
     # dropped is a known outcome, not an unknown reference (matches selection.py's
