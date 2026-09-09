@@ -12,7 +12,8 @@ orchestra = "orchestra.cli:main"
 dev = ["mypy>=1.15", "pytest>=8.0", "ruff>=0.11", "pytest-timeout>=2.3"]
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "B", "SIM", "ARG", "ERA", "T20", "PD"]
+# ARG002 (unused method argument) is dropped, ARG001 (unused function argument) kept. Ruling of 2026-09-08 during the refactor trial: a method implementing a shared interface has to take that interface's arguments.
+select = ["E4", "E7", "E9", "F", "B", "SIM", "ARG001", "ERA", "T20", "PD"]
 
 [tool.pytest.ini_options]
 timeout = 5
