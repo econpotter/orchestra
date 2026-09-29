@@ -1,6 +1,6 @@
 # Coding standards
 
-Read and apply `~/.config/agents/references/coding-standards.md`.
+Read and apply `~/.config/agentic/references/coding-standards.md`.
 
 - Reconciliation is the sole automated lifecycle writer of queue files; explicit operator
   commands perform intentional human-directed transitions.
